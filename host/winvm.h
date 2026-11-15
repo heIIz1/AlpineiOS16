@@ -14,6 +14,9 @@ typedef struct HvWinVmConfig {
     const char *disk1;        /* Optional secondary/installer NVMe disk image (read-only) */
     const char *share_dir;    /* Optional host folder shared over WebDAV at http://10.0.2.4/ */
     const char *share_sock;   /* Path for internal WebDAV Unix domain socket */
+    const char *host_model;   /* Optional Apple model identifier for guest SMBIOS */
+    const char *host_chip;
+    unsigned display_hz;
     int ncpus;
     uint64_t ram_mb;
     size_t jit_bytes;

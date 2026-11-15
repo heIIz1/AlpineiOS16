@@ -17,6 +17,8 @@ typedef enum {
 } HvBatteryState;
 /* Publish a fresh host reading. A negative percent means unavailable. */
 void hv_share_set_battery(int percent, HvBatteryState state);
+unsigned hv_share_battery_snapshot(void);
+void hv_share_set_host_info(const char *json);
 
 /* The device's clipboard, for the guest to pick up. */
 void hv_share_set_clipboard(const char *text);

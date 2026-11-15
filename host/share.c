@@ -757,6 +757,18 @@ static int open_url_put(Conn *c, Request *r) {
 
 /* Pack both values in one atomic so the HTTP reply is a consistent reading. */
 static atomic_uint host_battery;
+static pthread_mutex_t host_info_lock = PTHREAD_MUTEX_INITIALIZER;
+static char host_info[512] = "{}";
+
+void hv_share_set_host_info(const char *json) {
+    pthread_mutex_lock(&host_info_lock);
+    snprintf(host_info, sizeof host_info, "%s", json);
+    pthread_mutex_unlock(&host_info_lock);
+}
+
+unsigned hv_share_battery_snapshot(void) {
+    return atomic_load(&host_battery);
+}
 
 void hv_share_set_battery(int percent, HvBatteryState state) {
     unsigned level = percent >= 0 && percent <= 100 ? (unsigned)percent + 1 : 0;
@@ -778,9 +790,20 @@ static int serve_battery(Conn *c, Request *r) {
     return respond(c, r, 200, "OK", "Content-Type: application/json\r\nCache-Control: no-store\r\n", json, (size_t)n);
 }
 
+static int serve_host_info(Conn *c, Request *r) {
+    if (strcmp(r->method, "GET")) return respond_empty(c, r, 405, "Method Not Allowed");
+    if (body_discard(c, r) != 0) return -1;
+    char json[sizeof host_info];
+    pthread_mutex_lock(&host_info_lock);
+    memcpy(json, host_info, sizeof json);
+    pthread_mutex_unlock(&host_info_lock);
+    return respond(c, r, 200, "OK", "Content-Type: application/json\r\nCache-Control: no-store\r\n", json, strlen(json));
+}
+
 static int serve_henge(Conn *c, Request *r) {
     const char *what = r->path + strlen("/.henge/");
     if (!strcmp(what, "battery")) return serve_battery(c, r);
+    if (!strcmp(what, "host")) return serve_host_info(c, r);
     if (!strcmp(what, "install") && !strcmp(r->method, "GET")) {
         if (body_discard(c, r) != 0) return -1;
         return respond(c, r, 200, "OK", "Content-Type: text/plain\r\n", install_script, sizeof install_script - 1);

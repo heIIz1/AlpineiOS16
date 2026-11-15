@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "mmu.h"
+#include "share.h"
 #include "timer.h"
 
 extern kern_return_t mach_memory_entry_ownership(mach_port_t entry, task_t owner, int ledger_tag, int ledger_flags);
@@ -80,6 +81,12 @@ static uint64_t ged_read(void *opaque, uint64_t off, unsigned size) {
         uint32_t ev = __atomic_exchange_n(&b->ged_events, 0, __ATOMIC_ACQ_REL);
         return ev;
     }
+    const unsigned battery = hv_share_battery_snapshot();
+    const unsigned level = battery >> 8;
+    const unsigned state = battery & 255;
+    if (off == 4) return state == HV_BATTERY_CHARGING ? 2 : state == HV_BATTERY_UNPLUGGED ? 1 : 0;
+    if (off == 8) return level ? level - 1 : UINT32_MAX;
+    if (off == 12) return state == HV_BATTERY_CHARGING || state == HV_BATTERY_FULL;
     return 0;
 }
 
@@ -95,6 +102,14 @@ static uint64_t tick_locked(HvMachine *m, HvCpu *cpu) {
     uint64_t deadline = hv_timer_update(b->gic, cpu);
     if (cpu->index != 0) return deadline;
     hv_pl031_tick(b->rtc);
+    if (b->host_power) {
+        unsigned battery = hv_share_battery_snapshot();
+        if (battery != b->battery_snapshot) {
+            b->battery_snapshot = battery;
+            __atomic_fetch_or(&b->ged_events, 4U, __ATOMIC_ACQ_REL);
+            hv_gicv3_pend(b->gic, WINVIRT_INTID_GED);
+        }
+    }
     if (b->poll) b->poll();
     hv_xhci_poll(b->usb);
     hv_virtio_input_poll(b->keyboard);
@@ -120,12 +135,15 @@ static void uart_stdout_cb(void *opaque, uint8_t c) {
 
 int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_t ram_size,
                       void *prealloc_ram, const char *code_fd_path, const char *vars_fd_path,
-                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound) {
+                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound,
+                      const char *host_model, const char *host_chip, unsigned display_hz) {
     memset(b, 0, sizeof *b);
     b->m = m;
     b->cpu = cpu;
     b->ncpus = ncpus < 1 ? 1 : ncpus > HV_MAX_CPUS ? HV_MAX_CPUS : ncpus;
     b->ram_size = ram_size;
+    b->host_power = host_model && *host_model;
+    b->battery_snapshot = hv_share_battery_snapshot();
 
     /* 1. Allocate Guest RAM (pre-allocated ledger-exempt on iOS, debugger ledger-exempt, file-backed, or anon mmap) */
     const char *ram_file = getenv("HV_RAM_FILE");
@@ -189,7 +207,8 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
 
     b->fw_cfg = hv_fw_cfg_create(m, WINVIRT_FW_CFG_PA, (uint16_t)ncpus);
     b->fb = hv_fb_display_create(m, b->fw_cfg);
-    hv_acpi_build_and_register(b->fw_cfg, b->ncpus, ram_size, 0, 0);
+    hv_acpi_build_and_register(b->fw_cfg, b->ncpus, ram_size, 0, 0, b->host_power);
+    if (b->host_power) hv_smbios_register_host(b->fw_cfg, host_model, host_chip, b->ncpus);
 
     /* 7. PCIe Root Complex (GPEX):
      *    Slot 0: Host Bridge (1b36:0008)
@@ -218,7 +237,7 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
         if (sscanf(mode, "%ux%u", &width, &height) != 2 ||
             width < 320 || height < 320 || width > 2048 || height > 2048)
             return -1;
-        if (hv_virtio_gpu_create(m, b->pcie, b->fb, width, height)) return -1;
+        if (hv_virtio_gpu_create(m, b->pcie, b->fb, width, height, display_hz)) return -1;
         b->keyboard = hv_virtio_input_create(m, b->pcie, HV_VINPUT_KEYBOARD);
         b->touchscreen = hv_virtio_input_create(m, b->pcie, HV_VINPUT_TOUCHSCREEN);
     }

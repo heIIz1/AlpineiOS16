@@ -207,7 +207,7 @@ static void aml_crs_mem32_irq(Buf *crs, uint32_t base, uint32_t len, uint32_t gs
     b_u8(crs, 0x00);
 }
 
-static void build_dsdt(Buf *tabs, int ncpus) {
+static void build_dsdt(Buf *tabs, int ncpus, int host_power) {
     size_t start = tabs->len;
     acpi_hdr(tabs, "DSDT", 0, 2, "WINVIRT ");
 
@@ -394,6 +394,57 @@ static void build_dsdt(Buf *tabs, int ncpus) {
         free(dev.buf);
     }
 
+    if (host_power) {
+        Buf battery = {0}, info = {0}, ac = {0};
+        aml_name_str(&battery, "_HID", "PNP0C0A");
+        aml_name_int(&battery, "_STA", 0x1f);
+
+        /* Normalize the battery capacity to percentage units. Rate and voltage are unavailable. */
+        const uint32_t unknown = UINT32_MAX;
+        const uint32_t values[] = {1, 100, 100, 1, unknown, 10, 5, 1, 1};
+        b_u8(&info, 13);
+        for (size_t i = 0; i < sizeof values / sizeof values[0]; i++) aml_int(&info, values[i]);
+        aml_str(&info, "iPhone");
+        aml_str(&info, "");
+        aml_str(&info, "LION");
+        aml_str(&info, "Apple");
+        b_u8(&battery, 0x08);
+        b_put(&battery, "_BIF", 4);
+        b_u8(&battery, 0x12);
+        aml_pkg_len(&battery, info.len);
+        b_put(&battery, info.buf, info.len);
+
+        const uint8_t bst[] = {
+            0x70, 0x12, 0x12, 4, 0,
+            0x0c, 0xff, 0xff, 0xff, 0xff,
+            0x0c, 0xff, 0xff, 0xff, 0xff,
+            0x0c, 0xff, 0xff, 0xff, 0xff, 0x60,
+            /* Store (\_SB.GED.BSTA, Index (Local0, Zero)) */
+            0x70, 0x5c, 0x2f, 3, '_','S','B','_', 'G','E','D','_', 'B','S','T','A',
+            0x88, 0x60, 0, 0,
+            0x70, 0x5c, 0x2f, 3, '_','S','B','_', 'G','E','D','_', 'B','C','A','P',
+            0x88, 0x60, 0x0a, 2, 0,
+            0xa4, 0x60
+        };
+        b_u8(&battery, 0x14);
+        aml_pkg_len(&battery, 5 + sizeof bst);
+        b_put(&battery, "_BST", 4);
+        b_u8(&battery, 0x08);
+        b_put(&battery, bst, sizeof bst);
+        aml_device(&sb, "BAT0", &battery);
+
+        aml_name_str(&ac, "_HID", "ACPI0003");
+        static const uint8_t psr[] = {
+            0x14, 0x16, '_','P','S','R', 0, 0xa4,
+            0x5c, 0x2f, 3, '_','S','B','_', 'G','E','D','_', 'A','C','O','N'
+        };
+        b_put(&ac, psr, sizeof psr);
+        aml_device(&sb, "AC0_", &ac);
+        free(battery.buf);
+        free(info.buf);
+        free(ac.buf);
+    }
+
     /* Power button (PWRB, PNP0C0C) + Generic Event Device (GED_, ACPI0013 at 0x09080000, GSI 41 / SPI 9) */
     {
         Buf pwrb = {0};
@@ -407,18 +458,37 @@ static void build_dsdt(Buf *tabs, int ncpus) {
         aml_name_str(&ged, "_UID", "GED");
         aml_crs_mem32_irq(&crs, 0, 0, 41U, 1, 1, 0);
         aml_name_buf(&ged, "_CRS", crs.buf, crs.len);
-        static const uint8_t ged_evt[] = {
-            /* OperationRegion (EREG, SystemMemory, 0x09080000, 0x04) */
-            0x5b, 0x80, 'E', 'R', 'E', 'G', 0x00, 0x0c, 0x00, 0x00, 0x08, 0x09, 0x0a, 0x04,
-            /* Field (EREG, DWordAcc, NoLock, WriteAsZeros) { ESEL, 32 } */
-            0x5b, 0x81, 0x0b, 'E', 'R', 'E', 'G', 0x43, 'E', 'S', 'E', 'L', 0x20,
-            /* Method (_EVT, 1, Serialized) { Local0 = ESEL; If ((Local0 & 2) == 2) { Notify (PWRB, 0x80) } } */
-            0x14, 0x1d, '_', 'E', 'V', 'T', 0x09,
+        const uint8_t region[] = {
+            0x5b, 0x80, 'E', 'R', 'E', 'G', 0x00, 0x0c, 0x00, 0x00, 0x08, 0x09, 0x0a, 0x10,
+        };
+        b_put(&ged, region, sizeof region);
+        b_u8(&ged, 0x5b);
+        b_u8(&ged, 0x81);
+        aml_pkg_len(&ged, host_power ? 25 : 10);
+        b_put(&ged, "EREG", 4);
+        b_u8(&ged, 0x43);
+        b_put(&ged, "ESEL", 4);
+        b_u8(&ged, 0x20);
+        if (host_power) {
+            const uint8_t fields[] = {'B','S','T','A',0x20, 'B','C','A','P',0x20, 'A','C','O','N',0x20};
+            b_put(&ged, fields, sizeof fields);
+        }
+        const uint8_t power_event[] = {
             0x70, 'E', 'S', 'E', 'L', 0x60,
             0xa0, 0x10, 0x93, 0x7b, 0x60, 0x0a, 0x02, 0x00, 0x0a, 0x02,
             0x86, 'P', 'W', 'R', 'B', 0x0a, 0x80,
         };
-        b_put(&ged, ged_evt, sizeof ged_evt);
+        const uint8_t battery_event[] = {
+            0xa0, 0x17, 0x93, 0x7b, 0x60, 0x0a, 0x04, 0x00, 0x0a, 0x04,
+            0x86, 'B', 'A', 'T', '0', 0x0a, 0x80,
+            0x86, 'A', 'C', '0', '_', 0x0a, 0x80,
+        };
+        b_u8(&ged, 0x14);
+        aml_pkg_len(&ged, 5 + sizeof power_event + (host_power ? sizeof battery_event : 0));
+        b_put(&ged, "_EVT", 4);
+        b_u8(&ged, 0x09);
+        b_put(&ged, power_event, sizeof power_event);
+        if (host_power) b_put(&ged, battery_event, sizeof battery_event);
         aml_device(&sb, "GED_", &ged);
         free(crs.buf);
         free(ged.buf);
@@ -890,7 +960,7 @@ static void build_smbios(HvFwCfg *fw, int ncpus, uint64_t ram_size) {
     free(t.buf);
 }
 
-void hv_acpi_build_and_register(HvFwCfg *fw, int ncpus, uint64_t ram_size, int spi_msi_base, int spi_msi_count) {
+void hv_acpi_build_and_register(HvFwCfg *fw, int ncpus, uint64_t ram_size, int spi_msi_base, int spi_msi_count, int host_power) {
     Buf tabs = {0};
     Loader ldr = {0};
 
@@ -898,7 +968,7 @@ void hv_acpi_build_and_register(HvFwCfg *fw, int ncpus, uint64_t ram_size, int s
     loader_alloc(&ldr, "etc/acpi/tables", 64, 1); /* Zone 1 = HIGH */
 
     /* 1. DSDT at offset 0 */
-    build_dsdt(&tabs, ncpus);
+    build_dsdt(&tabs, ncpus, host_power);
     uint32_t dsdt_len = (uint32_t)tabs.len;
     loader_add_cksum(&ldr, "etc/acpi/tables", 9, 0, dsdt_len);
 
@@ -973,8 +1043,48 @@ void hv_acpi_build_and_register(HvFwCfg *fw, int ncpus, uint64_t ram_size, int s
     hv_fw_cfg_add_file(fw, "etc/boot-fail-wait", &boot_fail_wait, 4);
     hv_fw_cfg_add_file(fw, "etc/table-loader", ldr.buf.buf, ldr.buf.len);
 
-    build_smbios(fw, ncpus, ram_size);
+    if (!host_power) build_smbios(fw, ncpus, ram_size);
 
     free(tabs.buf);
     free(ldr.buf.buf);
+}
+
+
+void hv_smbios_register_host(HvFwCfg *fw, const char *model, const char *chip, int ncpus) {
+    Buf tables = {0};
+    uint8_t system[27] = {1, sizeof system, 0, 1, 1, 2};
+    if (chip && *chip) system[6] = 3; /* Product version is readable in Linux DMI sysfs. */
+    system[24] = 6; /* Power switch */
+    b_put(&tables, system, sizeof system);
+    b_put(&tables, "Apple", sizeof "Apple");
+    b_put(&tables, model, strlen(model) + 1);
+    if (system[6]) b_put(&tables, chip, strlen(chip) + 1);
+    b_u8(&tables, 0);
+
+    if (system[6]) {
+        uint8_t cpu[42] = {4, sizeof cpu, 0, 4, 1, 3, 0xfe, 2};
+        cpu[16] = 3; /* Processor version string */
+        cpu[24] = 0x41; /* Populated and enabled */
+        memset(cpu + 26, 0xff, 6);
+        cpu[35] = (uint8_t)ncpus;
+        cpu[36] = (uint8_t)ncpus;
+        cpu[37] = (uint8_t)ncpus;
+        cpu[40] = 0x01; /* ARMv8 (family 0x0101) */
+        cpu[41] = 0x01;
+        b_put(&tables, cpu, sizeof cpu);
+        b_put(&tables, "CPU0", sizeof "CPU0");
+        b_put(&tables, "Apple", sizeof "Apple");
+        b_put(&tables, chip, strlen(chip) + 1);
+        b_u8(&tables, 0);
+    }
+
+    const uint8_t end[] = {127, 4, 0xff, 0xff, 0, 0};
+    b_put(&tables, end, sizeof end);
+    uint8_t anchor[24] = {'_', 'S', 'M', '3', '_', 0, 24, 3, 2, 0, 1};
+    const uint32_t length = (uint32_t)tables.len;
+    memcpy(anchor + 12, &length, sizeof length);
+    anchor[5] = acpi_cksum(anchor, sizeof anchor);
+    hv_fw_cfg_add_file(fw, "etc/smbios/smbios-tables", tables.buf, length);
+    hv_fw_cfg_add_file(fw, "etc/smbios/smbios-anchor", anchor, sizeof anchor);
+    free(tables.buf);
 }

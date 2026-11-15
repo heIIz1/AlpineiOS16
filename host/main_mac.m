@@ -157,6 +157,12 @@ static void *cmd_file_thread(void *arg) {
             hv_winvm_key_hid(0x28, 0);
         } else if (!strcmp(line, "cad")) {
             hv_winvm_send_ctrl_alt_del();
+        } else if (!strncmp(line, "battery ", 8)) {
+            int percent, state;
+            if (sscanf(line + 8, "%d %d", &percent, &state) == 2 &&
+                state >= HV_BATTERY_UNKNOWN && state <= HV_BATTERY_FULL) {
+                hv_share_set_battery(percent, (HvBatteryState)state);
+            }
         } else if (!strcmp(line, "power")) {
             hv_winvm_power_button();
         } else if (!strncmp(line, "serial ", 7)) {
@@ -520,6 +526,11 @@ int main(int argc, char **argv) {
     int headless = 0;
     TimerArgs targs = {NULL, 0, 0};
     const char *cmd_file = getenv("HV_INPUT_FILE");
+    /* Optional host metadata for desktop test runs. */
+    cfg.host_model = getenv("HV_HOST_MODEL");
+    cfg.host_chip = getenv("HV_HOST_CHIP");
+    const char *display_hz = getenv("HV_DISPLAY_HZ");
+    if (display_hz) cfg.display_hz = (unsigned)strtoul(display_hz, NULL, 10);
     char share_sock_buf[512] = {0};
 
     for (int i = 1; i < argc; i++) {

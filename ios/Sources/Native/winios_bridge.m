@@ -2,12 +2,14 @@
 #import "winios_bridge.h"
 
 #include "hvsparse.h"
+#include "fb_display.h"
 #include "share.h"
 #include "winios_jit.h"
 #include "winvm.h"
 
 #import <UIKit/UIKit.h>
 #include <mach/mach_time.h>
+#include <sys/sysctl.h>
 #include <os/lock.h>
 #include <sys/stat.h>
 
@@ -123,6 +125,32 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     _screenSizePts = size;
     if (scale > 0.0) _screenScale = scale;
     os_unfair_lock_unlock(&_metricsLock);
+}
+
+static NSString *hostModel(void) {
+    char model[64] = {0};
+    size_t len = sizeof model;
+    if (sysctlbyname("hw.machine", model, &len, NULL, 0) != 0 || len == 0 || len > sizeof model) return nil;
+    return [NSString stringWithUTF8String:model];
+}
+
+static NSString *hostChip(NSString *model) {
+    char brand[96] = {0};
+    size_t len = sizeof brand;
+    if (sysctlbyname("machdep.cpu.brand_string", brand, &len, NULL, 0) == 0 && len > 1 && len <= sizeof brand) {
+        NSString *name = [NSString stringWithUTF8String:brand];
+        if ([name hasPrefix:@"Apple "]) return name;
+    }
+    if ([model hasPrefix:@"iPhone17,"]) {
+        return [model isEqualToString:@"iPhone17,1"] || [model isEqualToString:@"iPhone17,2"]
+            ? @"Apple A18 Pro" : @"Apple A18";
+    }
+    if ([model hasPrefix:@"iPhone16,"]) return @"Apple A17 Pro";
+    if ([model hasPrefix:@"iPhone15,"]) return @"Apple A16 Bionic";
+    if ([model hasPrefix:@"iPhone14,"]) return @"Apple A15 Bionic";
+    if ([model hasPrefix:@"iPhone13,"]) return @"Apple A14 Bionic";
+    if ([model hasPrefix:@"iPhone12,"]) return @"Apple A13 Bionic";
+    return nil;
 }
 
 - (void)publishHostBattery:(NSNotification *)notification {
@@ -389,6 +417,21 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     _configuredRamMB = ramMB;
     _configuredCPUs = 1;
 
+    NSString *model = hostModel();
+    NSString *chip = hostChip(model);
+    unsigned displayHz = (unsigned)UIScreen.mainScreen.maximumFramesPerSecond;
+    NSDictionary *identity = @{
+        @"model": model ?: NSNull.null,
+        @"chip": chip ?: NSNull.null,
+        @"cpu_count": @(NSProcessInfo.processInfo.processorCount),
+        @"ios_version": UIDevice.currentDevice.systemVersion,
+        @"maximum_refresh_hz": @(displayHz)
+    };
+    NSData *identityJSON = [NSJSONSerialization dataWithJSONObject:identity options:0 error:nil];
+    NSString *json = [[NSString alloc] initWithData:identityJSON encoding:NSUTF8StringEncoding];
+    hv_share_set_host_info(json.UTF8String ?: "{}");
+    [self publishHostBattery:nil];
+
     HvWinVmConfig cfg = {
         .code_fd = codePath.fileSystemRepresentation,
         .vars_fd = varsPath.fileSystemRepresentation,
@@ -396,6 +439,9 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         .disk1 = hasSeed ? seedPath.fileSystemRepresentation : NULL,
         .share_dir = sharedDir.fileSystemRepresentation,
         .share_sock = shareSock.fileSystemRepresentation,
+        .host_model = model.UTF8String,
+        .host_chip = chip.UTF8String,
+        .display_hz = displayHz,
         .ncpus = _configuredCPUs,
         .ram_mb = _configuredRamMB,
         .jit_bytes = jit.size,
@@ -463,6 +509,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (void)onDiagTickBackground {
     _diagTickCount++;
+    dispatch_async(dispatch_get_main_queue(), ^{ [self publishHostBattery:nil]; });
     [self writeDiagnosticsSnapshot];
     if (_vmRunning && (_diagTickCount % 4u) == 0u) {
         hv_winvm_flush_disks();
@@ -503,6 +550,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     CGFloat scale = _screenScale;
     os_unfair_lock_unlock(&_metricsLock);
 
+    unsigned battery = hv_share_battery_snapshot();
     NSString *txt = [NSString stringWithFormat:
         @"vm_running: %@\n"
         @"vm_status: %@\n"
@@ -522,6 +570,9 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         @"usb_tab_ready: %d\n"
         @"usb_delivered: %llu\n"
         @"share_up: %d\n"
+        @"host_model: %@\n"
+        @"host_battery_percent: %d\n"
+        @"display_link_hz: %.1f\n"
         @"screen_pts: %.0fx%.0f @%.0fx\n",
         running ? @"true" : @"false",
         _vmStatus ?: @"",
@@ -541,6 +592,9 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         tabReady,
         usbDelivered,
         running ? hv_winvm_share_up() : 0,
+        hostModel() ?: @"unknown",
+        (int)(battery >> 8) - 1,
+        hv_fb_metal_refresh_millihz() / 1000.0,
         pt.width, pt.height, scale];
     [txt writeToFile:statusFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }

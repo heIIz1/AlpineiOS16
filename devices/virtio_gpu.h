@@ -5,5 +5,5 @@
 #include "virtio.h"
 
 int hv_virtio_gpu_create(HvMachine *m, HvPcie *bus, HvFbDisplay *fb,
-                         uint32_t width, uint32_t height);
+                         uint32_t width, uint32_t height, unsigned display_hz);
 #endif

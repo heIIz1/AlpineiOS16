@@ -4,6 +4,9 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
 #import <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#import <UIKit/UIKit.h>
+#endif
 
 #include <os/lock.h>
 #include <stdatomic.h>
@@ -11,6 +14,11 @@
 #include <string.h>
 
 #include "fb_display.h"
+
+static atomic_uint display_link_millihz;
+unsigned hv_fb_metal_refresh_millihz(void) {
+    return atomic_load_explicit(&display_link_millihz, memory_order_relaxed);
+}
 
 static NSString *const kFbShaderSource =
     @"#include <metal_stdlib>\n"
@@ -43,7 +51,13 @@ static NSString *const kFbShaderSource =
     id<MTLRenderPipelineState> pipeline;
     id<MTLTexture> texture;
     uint32_t texW, texH;
+#if TARGET_OS_IPHONE
+    CADisplayLink *displayLink;
+    dispatch_queue_t renderQueue;
+    atomic_bool renderQueued;
+#else
     dispatch_source_t timer;
+#endif
     _Atomic(uint64_t) framesPresented;
     uint64_t lastHash;
     CGSize lastDrawableSize;
@@ -90,6 +104,7 @@ static NSString *const kFbShaderSource =
         if ([NSThread isMainThread]) cfg();
         else dispatch_async(dispatch_get_main_queue(), cfg);
 
+#if !TARGET_OS_IPHONE
         if (!timer) {
             dispatch_queue_t q = dispatch_queue_create("me.ammaar.windowsios.fbmetal", DISPATCH_QUEUE_SERIAL);
             timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
@@ -103,9 +118,46 @@ static NSString *const kFbShaderSource =
     } else if (!layer && timer) {
         dispatch_source_cancel(timer);
         timer = nil;
+#endif
     }
     os_unfair_lock_unlock(&lock);
+#if TARGET_OS_IPHONE
+    if ([NSThread isMainThread]) [self updateDisplayLink];
+    else dispatch_async(dispatch_get_main_queue(), ^{ [self updateDisplayLink]; });
+#endif
 }
+
+#if TARGET_OS_IPHONE
+- (void)updateDisplayLink {
+    os_unfair_lock_lock(&lock);
+    BOOL attached = layer != nil && device != nil;
+    os_unfair_lock_unlock(&lock);
+    if (!attached) {
+        [displayLink invalidate];
+        displayLink = nil;
+        atomic_store(&display_link_millihz, 0);
+        return;
+    }
+    if (displayLink) return;
+
+    if (!renderQueue) renderQueue = dispatch_queue_create("alpineios.metal", DISPATCH_QUEUE_SERIAL);
+    float maxHz = UIScreen.mainScreen.maximumFramesPerSecond;
+    displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(displayTick:)];
+    displayLink.preferredFrameRateRange = CAFrameRateRangeMake(MIN(30, maxHz), maxHz, maxHz);
+    [displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+}
+
+- (void)displayTick:(CADisplayLink *)link {
+    double interval = link.targetTimestamp - link.timestamp;
+    if (interval > 0)
+        atomic_store_explicit(&display_link_millihz, (unsigned)(1000.0 / interval + 0.5), memory_order_relaxed);
+    if (atomic_exchange_explicit(&renderQueued, true, memory_order_acquire)) return;
+    dispatch_async(renderQueue, ^{
+        [self tick];
+        atomic_store_explicit(&self->renderQueued, false, memory_order_release);
+    });
+}
+#endif
 
 static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint32_t stride) {
     uint64_t hash = ((uint64_t)w << 32) ^ h ^ stride;

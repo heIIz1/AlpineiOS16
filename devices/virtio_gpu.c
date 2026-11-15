@@ -8,6 +8,7 @@ enum { MAX_RESOURCES = 16, MAX_BACKING = 4096, MAX_WIDTH = 2048, MAX_HEIGHT = 20
 enum {
     GET_DISPLAY_INFO = 0x100, CREATE_2D, UNREF, SET_SCANOUT, FLUSH,
     TRANSFER_TO_HOST, ATTACH_BACKING, DETACH_BACKING,
+    GET_EDID = 0x10a, OK_EDID = 0x1104,
     OK = 0x1100, OK_DISPLAY_INFO, ERR_UNSPEC = 0x1200, ERR_NOMEM,
     ERR_SCANOUT, ERR_RESOURCE, ERR_CONTEXT, ERR_PARAMETER
 };
@@ -31,11 +32,49 @@ typedef struct Gpu {
     HvVirtio v;
     HvFbDisplay *fb;
     uint32_t width, height;
+    uint8_t edid[128];
     Resource resources[MAX_RESOURCES];
     Resource *scanout;
     Rect scanout_rect;
     uint8_t *pixels;
 } Gpu;
+
+static void edid_timing(uint8_t *d, unsigned w, unsigned h, unsigned hz) {
+    const unsigned hblank = 80, vblank = 30;
+    unsigned clock = ((w + hblank) * (h + vblank) * hz + 5000) / 10000;
+    d[0] = clock;
+    d[1] = clock >> 8;
+    d[2] = w;
+    d[3] = hblank;
+    d[4] = (w >> 8) << 4;
+    d[5] = h;
+    d[6] = vblank;
+    d[7] = (h >> 8) << 4;
+    d[8] = 16;
+    d[9] = 32;
+    d[10] = (3 << 4) | 5;
+    d[17] = 0x1e; /* Digital, separate positive sync. */
+}
+
+static void build_edid(Gpu *g, unsigned preferred_hz) {
+    uint8_t *edid = g->edid;
+    const uint8_t header[] = {0,255,255,255,255,255,255,0, 0x06,0x10, 1,0};
+    memcpy(edid, header, sizeof header);
+    edid[16] = 1;
+    edid[17] = 36; /* 2026 */
+    edid[18] = 1;
+    edid[19] = 4;
+    edid[20] = 0x80; /* Digital input */
+    edid[23] = 0xff; /* Unspecified gamma */
+    edid[24] = 2; /* Preferred timing */
+    memset(edid + 38, 1, 16); /* No standard timings */
+    edid_timing(edid + 54, g->width, g->height, preferred_hz);
+    edid_timing(edid + 72, g->width, g->height, 60);
+    const uint8_t name[] = {0,0,0,0xfc,0,'A','l','p','i','n','e','i','O','S','\n',' ',' ',' '};
+    memcpy(edid + 90, name, sizeof name);
+    edid[111] = 0x10; /* Unused descriptor */
+    for (unsigned i = 0; i < 127; i++) edid[127] -= edid[i];
+}
 
 static Resource *find_resource(Gpu *g, uint32_t id) {
     for (unsigned i = 0; i < MAX_RESOURCES; i++) {
@@ -116,6 +155,16 @@ static uint32_t execute(Gpu *g, const HvVirtqElem *e, Header *reply, uint32_t *b
         hv_virtq_write(&g->v, e, sizeof *reply, modes, sizeof modes);
         *bytes += sizeof modes;
         return OK_DISPLAY_INFO;
+    }
+    case GET_EDID: {
+        READ_REQUEST(req, uint32_t scanout, padding);
+        if (req.scanout || !g->edid[1]) return ERR_SCANOUT;
+        struct { uint32_t len, padding; uint8_t data[1024]; } edid = {sizeof g->edid, 0, {0}};
+        if (hv_virtq_writable(e) < sizeof *reply + sizeof edid) return ERR_PARAMETER;
+        memcpy(edid.data, g->edid, sizeof g->edid);
+        hv_virtq_write(&g->v, e, sizeof *reply, &edid, sizeof edid);
+        *bytes += sizeof edid;
+        return OK_EDID;
     }
     case CREATE_2D: {
         READ_REQUEST(req, uint32_t id, format, width, height);
@@ -225,18 +274,20 @@ static void notify(HvVirtio *v, int q) {
 }
 
 int hv_virtio_gpu_create(HvMachine *m, HvPcie *bus, HvFbDisplay *fb,
-                         uint32_t width, uint32_t height) {
+                         uint32_t width, uint32_t height, unsigned display_hz) {
     Gpu *g = calloc(1, sizeof *g);
     if (!g) return -1;
     g->pixels = calloc((size_t)MAX_WIDTH * MAX_HEIGHT, 4);
     if (!g->pixels) { free(g); return -1; }
-    hv_virtio_init(&g->v, m, 16, 0x038000, 2, 0);
+    g->width = width;
+    g->height = height;
+    const int advertise_edid = display_hz > 60 && display_hz <= 120;
+    if (advertise_edid) build_edid(g, display_hz);
+    hv_virtio_init(&g->v, m, 16, 0x038000, 2, advertise_edid ? 1u << 1 : 0);
     g->v.dev = g;
     g->v.notify = notify;
     g->v.config_len = 16;
     g->v.config[8] = 1; /* num_scanouts */
-    g->width = width;
-    g->height = height;
     g->fb = fb;
     hv_pcie_attach(bus, &g->v.pci);
     return 0;

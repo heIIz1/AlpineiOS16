@@ -47,6 +47,7 @@ targets:
         UILaunchScreen: {}
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        CADisableMinimumFrameDurationOnPhone: true
         UIStatusBarHidden: true
         UIViewControllerBasedStatusBarAppearance: false
         UISupportedInterfaceOrientations:

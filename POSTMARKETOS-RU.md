@@ -47,3 +47,10 @@ bash scripts/launch_on_iphone.sh YOUR_IPHONE_UDID "$ALPINE_BUNDLE_ID"
 - Свайп от нижнего края возвращает на экран iOS.
 
 Лицензия и авторство указаны в [LICENSE](LICENSE) и [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+
+## Данные iPhone внутри Linux
+
+Модель телефона передаётся через SMBIOS и доступна в /sys/class/dmi/id/product_name. Имя известного чипа находится в product_version и SMBIOS type 4. Заряд и состояние зарядки доступны через стандартные устройства /sys/class/power_supply/BAT0 и AC0. Их читает UPower, которым пользуется Phosh.
+
+На экранах ProMotion приложение запрашивает частоту до 120 Гц. Linux получает режимы 120 и 60 Гц. Фактическая частота зависит от состояния iOS и нагрузки виртуальной машины.

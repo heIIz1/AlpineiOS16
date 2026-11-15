@@ -68,7 +68,11 @@ Run the build script without `ALPINE_DEVELOPMENT_TEAM` to produce an unsigned `b
 - **Rotate in Phosh** — if taps are offset, match the touch orientation to the guest display from the controls.
 - **Return to iOS** — swipe up from the bottom edge. Use the power button in the controls to shut down Linux first if you're done with the VM.
 
-In the guest, `wget -qO- http://10.0.2.4/.henge/battery` reports the host battery level and charging state.
+Linux exposes the iPhone model through SMBIOS and DMI. Read /sys/class/dmi/id/product_name for the iPhone identifier and product_version for the chip when known. The processor is also described in SMBIOS type 4. Battery percentage and charging status are available through the standard ACPI power_supply interface, including /sys/class/power_supply/BAT0 and AC0, for UPower and desktop applications.
+
+The host also supplies JSON at http://10.0.2.4/.henge/host and http://10.0.2.4/.henge/battery. These endpoints expose the iPhone identifier, known chip name, physical core count, iOS version, display capability and battery state.
+
+On ProMotion devices the presenter requests up to the screen’s maximum refresh rate, and the VirtIO display advertises 120 Hz and 60 Hz modes. The actual display cadence and guest frame rate depend on iOS scheduling, power state and VM load.
 
 ## Development, credits and licenses
 
