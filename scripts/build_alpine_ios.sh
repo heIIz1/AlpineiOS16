@@ -14,14 +14,13 @@ if [[ -n "${ALPINE_DEVELOPMENT_TEAM:-}" ]]; then
 else
     signing=(CODE_SIGNING_ALLOWED=NO)
 fi
-image_source=()
+build=(xcodebuild -project ios/WindowsiOS.xcodeproj -scheme WindowsiOS
+    -configuration Release -sdk iphoneos -derivedDataPath build/DerivedData
+    PRODUCT_BUNDLE_IDENTIFIER="$bundle_id")
 if [[ -n "${ALPINE_IMAGE_MANIFEST_URL+x}" ]]; then
-    image_source=(ALPINE_IMAGE_MANIFEST_URL="$ALPINE_IMAGE_MANIFEST_URL")
+    build+=(ALPINE_IMAGE_MANIFEST_URL="$ALPINE_IMAGE_MANIFEST_URL")
 fi
-xcodebuild -project ios/WindowsiOS.xcodeproj -scheme WindowsiOS \
-    -configuration Release -sdk iphoneos -derivedDataPath build/DerivedData \
-    PRODUCT_BUNDLE_IDENTIFIER="$bundle_id" \
-    "${image_source[@]}" "${signing[@]}" build
+"${build[@]}" "${signing[@]}" build
 
 staging="$(mktemp -d "$ROOT/build/ipa.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
