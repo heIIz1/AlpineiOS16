@@ -16,6 +16,64 @@ final class VMViewModel: ObservableObject {
     @Published var hasMachine = false
     @Published var imageStatus: String?
     @Published var imageError: String?
+    @Published var downloadProgress: Double?
+    @Published var downloadBytesText: String?
+    @Published var downloadSpeedText: String?
+    @Published var downloadRemainingText: String?
+    @Published var lastDownloadActivity: Date?
+    private var lastDownloadSampleTime: TimeInterval = 0
+    private var lastDownloadSampleBytes: Int64 = 0
+    private var downloadBytesPerSecond: Double = 0
+
+    private func updateDownloadProgress(_ received: Int64, total: Int64) {
+        let fraction = total > 0 ? Double(received) / Double(total) : 0
+        downloadProgress = min(1, fraction)
+        let format: (Int64) -> String = { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
+        downloadBytesText = "\(format(received)) / \(format(total))"
+        lastDownloadActivity = Date()
+        let now = ProcessInfo.processInfo.systemUptime
+        let elapsed = now - lastDownloadSampleTime
+        if elapsed >= 0.3, received > lastDownloadSampleBytes {
+            let sample = Double(received - lastDownloadSampleBytes) / elapsed
+            downloadBytesPerSecond = downloadBytesPerSecond == 0 ? sample : 0.3 * sample + 0.7 * downloadBytesPerSecond
+            lastDownloadSampleTime = now
+            lastDownloadSampleBytes = received
+            downloadSpeedText = "\(format(Int64(downloadBytesPerSecond)))/s"
+            let seconds = Int(Double(max(0, total - received)) / downloadBytesPerSecond)
+            if seconds >= 60 {
+                downloadRemainingText = "About \(max(1, (seconds + 30) / 60)) min remaining"
+            } else {
+                downloadRemainingText = "About \(max(1, seconds)) sec remaining"
+            }
+        }
+    }
+
+    private func clearDownloadProgress() {
+        downloadProgress = nil
+        downloadBytesText = nil
+        downloadSpeedText = nil
+        downloadRemainingText = nil
+        lastDownloadActivity = nil
+    }
+    @Published private(set) var installationLog = ""
+    private let installLogURL = URL.applicationSupportDirectory.appendingPathComponent("AlpineiOS/installation.log")
+
+    func logInstallation(_ message: String) {
+        let time = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        installationLog = String((installationLog + "[\(time)] \(message)\n").suffix(65_536))
+        try? FileManager.default.createDirectory(at: installLogURL.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        try? Data(installationLog.utf8).write(to: installLogURL, options: [.atomic, .completeFileProtection])
+    }
+
+    func guestInstallationLog() -> String {
+        let file = SessionTools.shared.appendingPathComponent(".alpineios-install-log")
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return "" }
+        defer { try? handle.close() }
+        guard let length = try? handle.seekToEnd() else { return "" }
+        try? handle.seek(toOffset: length > 131_072 ? length - 131_072 : 0)
+        return String(decoding: (try? handle.readToEnd()) ?? Data(), as: UTF8.self)
+    }
     @Published var softwareStatus: PhoshInstaller.SoftwareStatus?
     @Published var consolePassword = PhoshInstaller.storedPassword()
     @Published var guestToolsStatus: String?
@@ -26,6 +84,7 @@ final class VMViewModel: ObservableObject {
     private var didAutoLaunchAttempt = false
 
     init() {
+        installationLog = (try? String(contentsOf: installLogURL, encoding: .utf8)) ?? ""
         let bridge = WinIOSBridge.shared
         bridge.installTrapGuard()
         bridge.onStateChanged = { [weak self] in
@@ -56,10 +115,24 @@ final class VMViewModel: ObservableObject {
         vmStatusText = b.vmStatusText
         guestTools.observe(Data())
         if let password = PhoshInstaller.storedPassword(), consolePassword != password { consolePassword = password }
-        guestToolsStatus = guestTools.status
+        let toolsStatus = guestTools.status
+        if toolsStatus != guestToolsStatus, let toolsStatus { logInstallation(toolsStatus) }
+        guestToolsStatus = toolsStatus
+        if b.isUnpacking {
+            downloadBytesText = "Disk extraction: \(Int(b.unpackProgress * 100))%"
+        }
         hasMachine = b.hasProvisionedMachine()
         if consolePassword != nil && softwareStatus != .ready {
-            softwareStatus = PhoshInstaller.softwareStatus()
+            let status = PhoshInstaller.softwareStatus()
+            if status != softwareStatus {
+                switch status {
+                case .installing: logInstallation("Linux is downloading and installing selected apps.")
+                case .retrying: logInstallation("Linux app installation failed. Retrying.")
+                case .ready: logInstallation("Selected Linux apps installed.")
+                case nil: break
+                }
+            }
+            softwareStatus = status
             if softwareStatus == .ready { PhoshInstaller.clearRequest() }
         }
     }
@@ -106,21 +179,43 @@ final class VMViewModel: ObservableObject {
         guard installTask == nil, !hasMachine, PhoshInstaller.validCustomPassword(customPassword) else { return }
         imageError = nil
         imageStatus = "Preparing download…"
+        clearDownloadProgress()
+        lastDownloadSampleTime = ProcessInfo.processInfo.systemUptime
+        lastDownloadSampleBytes = 0
+        downloadBytesPerSecond = 0
+        installationLog = ""
+        logInstallation("Preparing image download")
+        var lastMilestone = -1
         installTask = Task {
             let password = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
             do {
-                try await PhoshInstaller.install(address: address, apps: apps, password: password, customPassword: customPassword) {
+                try await PhoshInstaller.install(address: address, apps: apps, password: password, customPassword: customPassword, progress: { received, total in
+                    self.updateDownloadProgress(received, total: total)
+                    let fraction = total > 0 ? Double(received) / Double(total) : 0
+                    let milestone = Int(fraction * 10)
+                    if milestone > lastMilestone {
+                        lastMilestone = milestone
+                        self.logInstallation("Downloaded \(Int(fraction * 100))% — \(self.downloadBytesText ?? "")")
+                    }
+                }) {
                     imageStatus = $0
+                    logInstallation($0)
                 }
                 consolePassword = password
                 guestTools.prepare(password: password)
                 installTask = nil
                 imageStatus = nil
+                clearDownloadProgress()
+                logInstallation("Image verified and installed. Starting Linux.")
                 startOrRetry()
             } catch {
                 if !(error is CancellationError) && (error as? URLError)?.code != .cancelled {
                     imageError = error.localizedDescription
+                    logInstallation("Error: \(error.localizedDescription)")
+                } else {
+                    logInstallation("Download cancelled.")
                 }
+                clearDownloadProgress()
                 imageStatus = nil
                 installTask = nil
                 syncFromBridge()

@@ -22,6 +22,8 @@ The download includes Phosh and Settings. Firefox, Files (Nautilus), and GNOME C
 
 On the first launch, choose the apps you want and tap **Download and install**. The default image is hosted on GitHub Releases. [Phosh image downloads](https://github.com/Lumid-Off/AlpineiOS-images/releases/tag/phosh-26.06-r1) AlpineiOS verifies the assets with SHA-256, unpacks the disk, then boots when JIT is available. The guest downloads the selected apps after boot. You can choose a local password for `user` and `doas`, or leave it blank to generate one. The current password is in **Help**.
 
+Open **Installation log** to see download stages, transferred bytes and Linux package output. The log stays available after errors and can be shared from its toolbar. During Linux setup, tap the installation status at the bottom of the screen to open it.
+
 Set `ALPINE_IMAGE_MANIFEST_URL` at build time to use a different default URL. To create and stage the assets for your own server, run these commands on an Apple silicon Mac with QEMU and Python installed.
 
 ```sh

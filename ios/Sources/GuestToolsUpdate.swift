@@ -10,7 +10,7 @@ final class GuestToolsUpdate {
     private var tryingPendingPassword = false
     private let share = URL.documentsDirectory.appendingPathComponent("Shared")
     private let marker = ".alpineios-tools-status"
-    private let version = "14"
+    private let version = "15"
 
     var status: String? {
         if (try? String(contentsOf: share.appendingPathComponent(marker), encoding: .utf8)) == "failed" {
@@ -44,7 +44,7 @@ final class GuestToolsUpdate {
         }
         tail += String(decoding: data, as: UTF8.self)
         tail = String(tail.suffix(2048))
-        guard PhoshInstaller.softwareStatus() == .ready else { return }
+        guard PhoshInstaller.softwareStatus() != nil else { return }
         switch stage {
         case .login where tail.contains("alpine-iphone login:"):
             send("user")

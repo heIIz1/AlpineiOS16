@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 struct SessionView: View {
     @ObservedObject var vm: VMViewModel
     @State private var showHelp = false
+    @State private var showInstallationLog = false
     @State private var desktop = true
     @State private var controlsVisible = false
     @State private var importingFile = false
@@ -50,6 +51,7 @@ struct SessionView: View {
 
     private var tools: some View {
         Menu {
+            Button("Installation log", systemImage: "text.alignleft") { showInstallationLog = true }
             Picker("Display profile", selection: $displayProfile) {
                 Text("Automatic").tag("automatic")
                 Text("Smooth").tag("smooth")
@@ -193,12 +195,13 @@ struct SessionView: View {
         }
         .overlay(alignment: .bottom) {
             if vm.isVMRunning && (vm.guestToolsStatus != nil || (vm.consolePassword != nil && vm.softwareStatus != .ready)) {
-                Text(vm.guestToolsStatus ?? softwareStatusLabel)
+                Button { showInstallationLog = true } label: {
+                    Label(vm.guestToolsStatus ?? softwareStatusLabel, systemImage: "text.alignleft")
+                }
                     .font(.caption)
                     .padding(8)
                     .background(.regularMaterial, in: Capsule())
                     .padding()
-                    .allowsHitTesting(false)
             }
         }
         .onChange(of: displayProfile) { _, _ in WinIOSBridge.shared.refreshGuestDisplay() }
@@ -218,6 +221,7 @@ struct SessionView: View {
         }
         .statusBarHidden(true)
         .preferredColorScheme(.dark)
+        .sheet(isPresented: $showInstallationLog) { InstallationLogView(vm: vm) }
         .sheet(isPresented: $showHelp) {
             NavigationStack {
                 ScrollView {

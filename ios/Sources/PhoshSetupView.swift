@@ -17,6 +17,7 @@ struct PhoshSetupView: View {
     @State private var selected = PhoshApp.defaults
     @State private var showSource = false
     @State private var confirmRestore = false
+    @State private var showInstallationLog = false
 
     private var configuredSource: String {
         Bundle.main.object(forInfoDictionaryKey: "AlpineImageManifestURL") as? String ?? ""
@@ -27,7 +28,31 @@ struct PhoshSetupView: View {
             VStack(alignment: .leading, spacing: 22) {
                 hero
                 if let status = vm.imageStatus {
-                    ProgressView(status)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(status).font(.subheadline)
+                        if let progress = vm.downloadProgress {
+                            ProgressView(value: progress)
+                        } else { ProgressView() }
+                        if let bytes = vm.downloadBytesText {
+                            Text(bytes).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                        if let activity = vm.lastDownloadActivity {
+                            TimelineView(.periodic(from: .now, by: 1)) { context in
+                                if context.date.timeIntervalSince(activity) > 5 {
+                                    Text("0 B/s · Waiting for data…")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                } else {
+                                    HStack {
+                                        Text(vm.downloadSpeedText ?? "Measuring speed…")
+                                        Spacer()
+                                        if let remaining = vm.downloadRemainingText { Text(remaining) }
+                                    }
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(18)
                         .background(AlpineTheme.panel, in: RoundedRectangle(cornerRadius: 20))
@@ -37,6 +62,10 @@ struct PhoshSetupView: View {
                     passwordOptions
                     software
                     source
+                }
+
+                Button { showInstallationLog = true } label: {
+                    Label("Installation log", systemImage: "text.alignleft")
                 }
 
                 if let error = vm.imageError {
@@ -49,6 +78,7 @@ struct PhoshSetupView: View {
             .padding(22)
             .frame(maxWidth: .infinity)
         }
+        .sheet(isPresented: $showInstallationLog) { InstallationLogView(vm: vm) }
         .scrollDismissesKeyboard(.interactively)
         .background(AlpineTheme.background.ignoresSafeArea())
         .safeAreaInset(edge: .bottom, spacing: 0) {

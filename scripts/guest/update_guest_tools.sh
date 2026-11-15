@@ -1,14 +1,41 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
 set -eu
-version=14
+version=15
 bridge=http://10.0.2.4
 status="$bridge/.alpineios-tools-status"
 report() { curl -fsS --max-time 5 -X PUT --data-binary "$1" "$status" >/dev/null 2>&1 || true; }
 log=/var/log/alpineios-guest-tools.log
 mkdir -p /var/log
 exec > "$log" 2>&1
+# Publish bounded installation output while the original image's app installer runs.
+# No request files or credentials are included.
+(
+    previous=
+    while sleep 3; do
+        {
+            printf 'Selected apps\n'
+            tail -c 65536 /var/log/alpineios-install-apps.log 2>/dev/null || true
+            printf '\nLinux tools\n'
+            tail -c 65536 /var/log/alpineios-guest-tools.log 2>/dev/null || true
+        } > /tmp/alpineios-install-log
+        current="$(cksum /tmp/alpineios-install-log)"
+        if [ "$current" != "$previous" ]; then
+            if curl -fsS --max-time 5 -T /tmp/alpineios-install-log "$bridge/.alpineios-install-log" >/dev/null 2>&1; then
+                previous=$current
+            fi
+        fi
+        [ -f /var/lib/alpineios/tools-version ] || continue
+        [ "$(cat /var/lib/alpineios/tools-version)" = "$version" ] && [ "$current" = "$previous" ] && exit 0
+    done
+) </dev/null >/dev/null 2>&1 &
 trap 'report failed' EXIT
+echo "Waiting for selected Linux apps to finish installing."
+while [ "$(curl -fsS --max-time 3 "$bridge/.alpineios-install-status" 2>/dev/null || true)" != ready ]; do
+    sleep 2
+done
+echo "Selected apps are ready. Installing Linux tools."
+
 
 apk add curl wl-clipboard </dev/null
 report installing
