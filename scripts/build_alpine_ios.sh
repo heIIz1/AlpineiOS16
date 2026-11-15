@@ -28,6 +28,5 @@ staging="$(mktemp -d "$ROOT/build/ipa.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
 mkdir -p "$staging/Payload"
 ditto build/DerivedData/Build/Products/Release-iphoneos/WindowsiOS.app "$staging/Payload/WindowsiOS.app"
-(cd "$staging" && /usr/bin/zip -qry AlpineiOS.ipa Payload)
-mv -f "$staging/AlpineiOS.ipa" build/AlpineiOS.ipa
+python3 scripts/package_ipa.py "$staging/Payload/WindowsiOS.app" build/AlpineiOS.ipa
 echo "Created build/AlpineiOS.ipa for $bundle_id."

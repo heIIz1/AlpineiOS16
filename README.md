@@ -65,6 +65,14 @@ Omit `ALPINE_IMAGE_MANIFEST_URL` to use the default GitHub image. Local VM prepa
 
 Run the build script without `ALPINE_DEVELOPMENT_TEAM` to produce an unsigned `build/AlpineiOS.ipa`. The release IPA is unsigned. Build and development-sign it with your own Apple team to use the debugger-assisted launch above. The release includes the dependency sources used to build the IPA.
 
+If a signer cannot read the normal IPA, the release also provides an experimental `unsigned-compat.ipa` with equivalent XML plists and the main `Info.plist` first in the ZIP. GBox import is awaiting device verification. To create this variant from an unsigned app:
+
+```sh
+python3 scripts/package_ipa.py path/to/WindowsiOS.app build/AlpineiOS-compat.ipa --xml-plists
+```
+
+Do not convert plists after signing; the packager rejects XML conversion when a code signature is present.
+
 ## Controls
 
 - **Phosh app grid** — swipe up with two fingers from inside the desktop, or tap with three fingers and choose **Apps**.
