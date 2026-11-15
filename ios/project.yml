@@ -30,6 +30,13 @@ targets:
           - "Resources/**"
       - path: Sources/Resources/Brand.xcassets
         buildPhase: resources
+      - path: ../scripts/guest/update_guest_tools.sh
+        buildPhase: resources
+      - path: ../ThirdParty/GraphicsLicenses
+        type: folder
+        buildPhase: resources
+      - path: deps/Resources
+        buildPhase: resources
       - path: Sources/Resources/henge-jit.js
         buildPhase: resources
     info:
@@ -47,6 +54,12 @@ targets:
         UILaunchScreen: {}
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: File to send to Linux
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.data
         CADisableMinimumFrameDurationOnPhone: true
         UIStatusBarHidden: true
         UIViewControllerBasedStatusBarAppearance: false
@@ -54,6 +67,9 @@ targets:
           - UIInterfaceOrientationPortrait
         UISupportedInterfaceOrientations~ipad:
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
     entitlements:
       path: WindowsiOS.entitlements
       properties:
@@ -63,8 +79,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: local.alpineios.app
         PRODUCT_NAME: WindowsiOS
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: 0.1.0
-        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 0.2.0
+        CURRENT_PROJECT_VERSION: 2
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -91,7 +107,23 @@ targets:
           - -lresolv
           - -liconv
     dependencies:
+      - framework: deps/Frameworks/vulkan.1.framework
+        embed: true
+        link: false
+      - framework: deps/Frameworks/epoxy.0.framework
+        embed: true
+        link: false
+      - framework: deps/Frameworks/GLESv2.framework
+        embed: true
+        link: false
+      - framework: deps/Frameworks/EGL.framework
+        embed: true
+        link: false
+      - framework: deps/Frameworks/virglrenderer.1.framework
+        embed: true
+        link: false
       - package: SwiftTerm
+      - sdk: AVFoundation.framework
       - sdk: Metal.framework
       - sdk: QuartzCore.framework
       - sdk: AudioToolbox.framework

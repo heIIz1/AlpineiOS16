@@ -15,8 +15,10 @@ struct WindowsiOSApp: App {
                 }
                 .onChange(of: scenePhase) { _, newPhase in
                     if newPhase == .active {
+                        WinIOSBridge.shared.setGuestPaused(false)
                         viewModel.onAppBecameActive()
                     } else if newPhase == .background {
+                        WinIOSBridge.shared.setGuestPaused(true)
                         WinIOSBridge.shared.flushDisks()
                     }
                 }

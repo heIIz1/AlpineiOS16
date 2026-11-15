@@ -35,6 +35,11 @@ typedef void (^WinIOSStateCallback)(void);
 - (void)prepareAndStartWithLayer:(nullable CAMetalLayer *)layer;
 - (void)bindMetalLayer:(nullable CAMetalLayer *)layer;
 
+- (void)refreshGuestDisplay;
+- (void)setGuestPaused:(BOOL)paused;
+- (void)publishClipboard:(NSString *)text;
+- (nullable NSString *)takeGuestClipboard;
+- (NSString *)machineDirectory;
 - (void)updateScreenSize:(CGSize)size scale:(CGFloat)scale;
 
 - (void)sendTabletNormalizedX:(double)x y:(double)y buttons:(uint8_t)buttons wheel:(int8_t)wheel;

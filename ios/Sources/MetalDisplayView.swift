@@ -15,6 +15,8 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
     }
     private var activeTouch: UITouch?
     private var touchBounds: CGRect = .zero
+    private var reportedWindowSize = CGSize.zero
+    private var reportedWindowScale: CGFloat = 0
     private var lastTouchPoint = (x: 0.0, y: 0.0)
     var onThreeFingerTap: (() -> Void)?
     var onAppsSwipe: (() -> Void)?
@@ -48,6 +50,19 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
         appsSwipe.direction = .up
         appsSwipe.numberOfTouchesRequired = 2
         addGestureRecognizer(appsSwipe)
+
+        let scroll = UIPanGestureRecognizer(target: self, action: #selector(handleTrackpadScroll(_:)))
+        scroll.allowedScrollTypesMask = .all
+        scroll.allowedTouchTypes = []
+        addGestureRecognizer(scroll)
+    }
+
+    @objc private func handleTrackpadScroll(_ gesture: UIPanGestureRecognizer) {
+        let delta = gesture.translation(in: self).y
+        guard abs(delta) >= 12 else { return }
+        gesture.setTranslation(.zero, in: self)
+        let (x, y) = normalizedPoint(for: gesture.location(in: self))
+        WinIOSBridge.shared.sendTabletNormalizedX(x, y: y, buttons: 0, wheel: delta > 0 ? -1 : 1)
     }
 
     private func sendTouch(_ touch: UITouch, down: Bool) {
@@ -121,7 +136,10 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
         let w = max(1.0, bounds.width * scale)
         let h = max(1.0, bounds.height * scale)
         metalLayer.drawableSize = CGSize(width: w, height: h)
-        if let winBounds = window?.bounds.size, winBounds.width > 0 {
+        if let winBounds = window?.bounds.size, winBounds.width > 0,
+           winBounds != reportedWindowSize || scale != reportedWindowScale {
+            reportedWindowSize = winBounds
+            reportedWindowScale = scale
             WinIOSBridge.shared.updateScreenSize(winBounds, scale: scale)
         }
     }
@@ -136,7 +154,9 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
         if fbW > 0 && fbH > 0 {
             let viewAspect = Double(bw / bh)
             let fbAspect = fbW / fbH
-            if viewAspect > fbAspect {
+            if abs(viewAspect / fbAspect - 1) <= 0.03 {
+                // Match Metal's full-window presentation for near-identical ratios.
+            } else if viewAspect > fbAspect {
                 let fittedW = CGFloat(Double(bh) * fbAspect)
                 rect = CGRect(x: (bw - fittedW) * 0.5, y: 0, width: fittedW, height: bh)
             } else {
@@ -162,6 +182,18 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
     }
 
     // MARK: - Software & Hardware Keyboard (USB HID Page 0x07)
+
+    override var keyCommands: [UIKeyCommand]? {
+        let apps = UIKeyCommand(input: "a", modifierFlags: [.command, .alternate],
+                                action: #selector(handleAppsSwipe))
+        apps.discoverabilityTitle = "Linux Apps"
+        let controls = UIKeyCommand(input: "l", modifierFlags: [.command, .alternate],
+                                    action: #selector(showLinuxControls))
+        controls.discoverabilityTitle = "Linux Controls"
+        return [apps, controls]
+    }
+
+    @objc private func showLinuxControls() { onThreeFingerTap?() }
 
     override var canBecomeFirstResponder: Bool { true }
     var hasText: Bool { true }

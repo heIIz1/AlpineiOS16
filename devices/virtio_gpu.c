@@ -1,14 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "virtio_gpu.h"
+#include "virgl.h"
 
+#include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 
-enum { MAX_RESOURCES = 16, MAX_BACKING = 4096, MAX_WIDTH = 2048, MAX_HEIGHT = 2048 };
+enum { MAX_RESOURCES = 512, MAX_BACKING = 4096, MAX_WIDTH = 2048, MAX_HEIGHT = 2048 };
 enum {
     GET_DISPLAY_INFO = 0x100, CREATE_2D, UNREF, SET_SCANOUT, FLUSH,
     TRANSFER_TO_HOST, ATTACH_BACKING, DETACH_BACKING,
+    GET_CAPSET_INFO = 0x108, GET_CAPSET = 0x109,
     GET_EDID = 0x10a, OK_EDID = 0x1104,
+    OK_CAPSET_INFO = 0x1102, OK_CAPSET = 0x1103,
+    CTX_CREATE = 0x200, CTX_DESTROY, CTX_ATTACH, CTX_DETACH,
+    CREATE_3D, TRANSFER_3D_WRITE, TRANSFER_3D_READ, SUBMIT_3D,
     OK = 0x1100, OK_DISPLAY_INFO, ERR_UNSPEC = 0x1200, ERR_NOMEM,
     ERR_SCANOUT, ERR_RESOURCE, ERR_CONTEXT, ERR_PARAMETER
 };
@@ -26,6 +33,8 @@ typedef struct Resource {
     Backing *entries;
     uint32_t entry_count;
     uint8_t *pixels;
+    struct iovec *iov;
+    int renderer_owned;
 } Resource;
 
 typedef struct Gpu {
@@ -33,11 +42,23 @@ typedef struct Gpu {
     HvFbDisplay *fb;
     uint32_t width, height;
     uint8_t edid[128];
+    HvVirgl *renderer;
     Resource resources[MAX_RESOURCES];
     Resource *scanout;
     Rect scanout_rect;
     uint8_t *pixels;
 } Gpu;
+
+/* Resize requests come from UIKit; the guest CPU applies them at its next poll. */
+static Gpu *active_gpu;
+static _Atomic uint32_t requested_size;
+static unsigned active_refresh_hz;
+static uint32_t advertised_modes[3][2];
+
+void hv_virtio_gpu_request_size(uint32_t width, uint32_t height) {
+    if (width >= 320 && height >= 320 && width <= MAX_WIDTH && height <= MAX_HEIGHT)
+        atomic_store(&requested_size, (width << 16) | height);
+}
 
 static void edid_timing(uint8_t *d, unsigned w, unsigned h, unsigned hz) {
     const unsigned hblank = 80, vblank = 30;
@@ -58,6 +79,7 @@ static void edid_timing(uint8_t *d, unsigned w, unsigned h, unsigned hz) {
 
 static void build_edid(Gpu *g, unsigned preferred_hz) {
     uint8_t *edid = g->edid;
+    memset(edid, 0, sizeof g->edid);
     const uint8_t header[] = {0,255,255,255,255,255,255,0, 0x06,0x10, 1,0};
     memcpy(edid, header, sizeof header);
     edid[16] = 1;
@@ -69,11 +91,35 @@ static void build_edid(Gpu *g, unsigned preferred_hz) {
     edid[24] = 2; /* Preferred timing */
     memset(edid + 38, 1, 16); /* No standard timings */
     edid_timing(edid + 54, g->width, g->height, preferred_hz);
-    edid_timing(edid + 72, g->width, g->height, 60);
-    const uint8_t name[] = {0,0,0,0xfc,0,'A','l','p','i','n','e','i','O','S','\n',' ',' ',' '};
-    memcpy(edid + 90, name, sizeof name);
-    edid[111] = 0x10; /* Unused descriptor */
+    unsigned descriptor = 1;
+    for (unsigned i = 0; i < 3; i++) {
+        unsigned w = advertised_modes[i][0], h = advertised_modes[i][1];
+        if (!w || !h || (w == g->width && h == g->height)) continue;
+        edid_timing(edid + 54 + descriptor++ * 18, w, h, i == 0 ? 60 : preferred_hz);
+    }
+    if (descriptor < 4 && preferred_hz != 60) {
+        edid_timing(edid + 54 + descriptor++ * 18, g->width, g->height, 60);
+    }
+    while (descriptor < 4) edid[54 + descriptor++ * 18 + 3] = 0x10;
     for (unsigned i = 0; i < 127; i++) edid[127] -= edid[i];
+}
+
+static void gpu_config_write(HvVirtio *v, uint32_t off, uint64_t value, unsigned size) {
+    if (off == 4 && size == 4) v->config[0] &= ~(uint8_t)value;
+}
+
+void hv_virtio_gpu_poll(void) {
+    Gpu *g = active_gpu;
+    if (!g || !(g->v.status & 4)) return;
+    uint32_t size = atomic_exchange(&requested_size, 0);
+    if (!size || (g->width == (size >> 16) && g->height == (size & 0xffff))) return;
+    g->width = size >> 16;
+    g->height = size & 0xffff;
+    build_edid(g, active_refresh_hz);
+    g->v.config[0] |= 1; /* VIRTIO_GPU_EVENT_DISPLAY */
+    g->v.config_gen++;
+    g->v.isr |= 2;       /* PCI configuration interrupt */
+    hv_pci_set_intx(&g->v.pci, 1);
 }
 
 static Resource *find_resource(Gpu *g, uint32_t id) {
@@ -117,8 +163,26 @@ static int transfer(Gpu *g, Resource *r, Rect rect, uint64_t offset) {
 }
 
 static void paint(Gpu *g) {
-    const Resource *r = g->scanout;
+    Resource *r = g->scanout;
     const Rect a = g->scanout_rect;
+    if (r->renderer_owned) {
+        HvVirglInfo info = {0};
+        if (!g->renderer->info(r->id, &info) && info.native_type == 2 && info.native_handle) {
+            pthread_mutex_lock(&g->fb->mu);
+            g->fb->fb_host = g->pixels; // Valid fallback storage for the scanout geometry.
+            pthread_mutex_unlock(&g->fb->mu);
+            // ANGLE must finish writing before another Metal queue copies the texture.
+            g->renderer->finish();
+            if (hv_fb_metal_publish_texture(g->fb, info.native_handle, a.x, a.y, a.w, a.h)) return;
+        }
+        if (!r->pixels) r->pixels = calloc((size_t)r->width * r->height, 4);
+        if (!r->pixels) return;
+        struct iovec target = {r->pixels, (size_t)r->width * r->height * 4};
+        HvVirglBox box = {0, 0, 0, r->width, r->height, 1};
+        g->renderer->force_context();
+        if (g->renderer->read(r->id, 0, 0, r->width * 4, 0, &box, 0, &target, 1)) return;
+    }
+    hv_fb_metal_use_pixels(g->fb);
     pthread_mutex_lock(&g->fb->mu);
     for (uint32_t y = 0; y < a.h; y++) {
         const uint8_t *src = r->pixels + ((size_t)(a.y + y) * r->width + a.x) * 4;
@@ -156,6 +220,91 @@ static uint32_t execute(Gpu *g, const HvVirtqElem *e, Header *reply, uint32_t *b
         *bytes += sizeof modes;
         return OK_DISPLAY_INFO;
     }
+    case GET_CAPSET_INFO: {
+        READ_REQUEST(req, uint32_t index, padding);
+        if (!g->renderer || req.index >= 2) return ERR_PARAMETER;
+        struct { uint32_t id, version, size, padding; } info = {req.index + 1, 0, 0, 0};
+        g->renderer->capset(info.id, &info.version, &info.size);
+        if (!info.size || hv_virtq_writable(e) < sizeof *reply + sizeof info) return ERR_PARAMETER;
+        hv_virtq_write(&g->v, e, sizeof *reply, &info, sizeof info);
+        *bytes += sizeof info;
+        return OK_CAPSET_INFO;
+    }
+    case GET_CAPSET: {
+        READ_REQUEST(req, uint32_t id, version);
+        if (!g->renderer || req.id < 1 || req.id > 2) return ERR_PARAMETER;
+        uint32_t version = 0, size = 0;
+        g->renderer->capset(req.id, &version, &size);
+        if (!size || size > 1048576 || req.version > version ||
+            hv_virtq_writable(e) < sizeof *reply + size) return ERR_PARAMETER;
+        void *caps = calloc(1, size);
+        if (!caps) return ERR_NOMEM;
+        g->renderer->caps(req.id, req.version, caps);
+        hv_virtq_write(&g->v, e, sizeof *reply, caps, size);
+        free(caps);
+        *bytes += size;
+        return OK_CAPSET;
+    }
+    case CTX_CREATE: {
+        READ_REQUEST(req, uint32_t length, flags; char name[64]);
+        if (!g->renderer || !reply->context || req.flags || req.length > sizeof req.name) return ERR_PARAMETER;
+        return g->renderer->context_create(reply->context, req.length, req.name) ? ERR_UNSPEC : OK;
+    }
+    case CTX_DESTROY:
+        if (!g->renderer || !reply->context) return ERR_CONTEXT;
+        g->renderer->context_destroy(reply->context);
+        return OK;
+    case CTX_ATTACH:
+    case CTX_DETACH: {
+        READ_REQUEST(req, uint32_t id, padding);
+        if (!g->renderer || !reply->context || !find_resource(g, req.id)) return ERR_RESOURCE;
+        if (reply->type == CTX_ATTACH) g->renderer->ctx_attach(reply->context, req.id);
+        else g->renderer->ctx_detach(reply->context, req.id);
+        return OK;
+    }
+    case CREATE_3D: {
+        READ_REQUEST(req, HvVirglResource args; uint32_t padding);
+        if (!g->renderer || !req.args.handle || find_resource(g, req.args.handle) ||
+            !req.args.width || !req.args.height || req.args.height > 8192 ||
+            req.args.width > (req.args.target == 0 ? (256u << 20) : 8192u) ||
+            req.args.last_level > 15 || req.args.array_size > 2048 || req.args.depth > 2048)
+            return ERR_PARAMETER;
+        Resource *r = find_resource(g, 0);
+        if (!r) return ERR_NOMEM;
+        if (g->renderer->resource_create(&req.args, NULL, 0)) return ERR_UNSPEC;
+        r->id = req.args.handle;
+        r->width = req.args.width;
+        r->height = req.args.height;
+        r->format = req.args.format;
+        r->renderer_owned = 1;
+        return OK;
+    }
+    case TRANSFER_3D_WRITE:
+    case TRANSFER_3D_READ: {
+        READ_REQUEST(req, HvVirglBox box; uint64_t offset; uint32_t id, level, stride, layer_stride);
+        Resource *r = find_resource(g, req.id);
+        if (!g->renderer || !r || !r->renderer_owned || !r->iov) return ERR_RESOURCE;
+        int result;
+        if (reply->type == TRANSFER_3D_READ)
+            result = g->renderer->read(req.id, reply->context, req.level, req.stride, req.layer_stride,
+                                      &req.box, req.offset, NULL, 0);
+        else
+            result = g->renderer->write(req.id, reply->context, req.level, req.stride, req.layer_stride,
+                                       &req.box, req.offset, NULL, 0);
+        return result ? ERR_PARAMETER : OK;
+    }
+    case SUBMIT_3D: {
+        READ_REQUEST(req, uint32_t size, padding);
+        if (!g->renderer || !reply->context || !req.size || req.size % 4 || req.size > (16u << 20))
+            return ERR_PARAMETER;
+        void *commands = malloc(req.size);
+        if (!commands) return ERR_NOMEM;
+        int result = -1;
+        if (hv_virtq_read(&g->v, e, sizeof req, commands, req.size) == req.size)
+            result = g->renderer->submit(commands, reply->context, req.size / 4);
+        free(commands);
+        return result ? ERR_UNSPEC : OK;
+    }
     case GET_EDID: {
         READ_REQUEST(req, uint32_t scanout, padding);
         if (req.scanout || !g->edid[1]) return ERR_SCANOUT;
@@ -174,6 +323,8 @@ static uint32_t execute(Gpu *g, const HvVirtqElem *e, Header *reply, uint32_t *b
             return ERR_PARAMETER;
         Resource *r = find_resource(g, 0);
         if (!r) return ERR_NOMEM;
+        // Pixman writes into guest memory. Keep legacy 2D buffers in that path
+        // even when 3D resources and contexts are available on the same device.
         r->pixels = calloc((size_t)req.width * req.height, 4);
         if (!r->pixels) return ERR_NOMEM;
         r->id = req.id; r->width = req.width; r->height = req.height; r->format = req.format;
@@ -184,6 +335,12 @@ static uint32_t execute(Gpu *g, const HvVirtqElem *e, Header *reply, uint32_t *b
         READ_REQUEST(req, uint32_t id, padding);
         Resource *r = find_resource(g, req.id);
         if (!req.id || !r) return ERR_RESOURCE;
+        if (r->renderer_owned) {
+            if (reply->type == UNREF) g->renderer->resource_unref(r->id);
+            else g->renderer->detach(r->id, NULL, NULL);
+        }
+        free(r->iov);
+        r->iov = NULL;
         free(r->entries);
         r->entries = NULL;
         r->entry_count = 0;
@@ -213,6 +370,20 @@ static uint32_t execute(Gpu *g, const HvVirtqElem *e, Header *reply, uint32_t *b
                 return ERR_PARAMETER;
             }
         }
+        if (r->renderer_owned) {
+            r->iov = calloc(req.count, sizeof(struct iovec));
+            if (!r->iov) { free(entries); return ERR_NOMEM; }
+            for (unsigned i = 0; i < req.count; i++) {
+                r->iov[i].iov_base = hv_phys_ptr(g->v.m, entries[i].address, entries[i].length);
+                r->iov[i].iov_len = entries[i].length;
+            }
+            if (g->renderer->attach(r->id, r->iov, req.count)) {
+                free(r->iov);
+                r->iov = NULL;
+                free(entries);
+                return ERR_PARAMETER;
+            }
+        }
         r->entries = entries;
         r->entry_count = req.count;
         return OK;
@@ -223,10 +394,15 @@ static uint32_t execute(Gpu *g, const HvVirtqElem *e, Header *reply, uint32_t *b
         if (!req.id) { g->scanout = NULL; return OK; }
         Resource *r = find_resource(g, req.id);
         if (!r) return ERR_RESOURCE;
-        if (!contains(r->width, r->height, req.rect)) return ERR_PARAMETER;
+        if (!contains(r->width, r->height, req.rect) ||
+            req.rect.w > MAX_WIDTH || req.rect.h > MAX_HEIGHT) return ERR_PARAMETER;
+        // A new scanout can already contain the finished frame: Linux may
+        // upload and flush a buffer before selecting it for display.
+        int changed = g->scanout != r ||
+                      memcmp(&g->scanout_rect, &req.rect, sizeof req.rect) != 0;
         g->scanout = r;
         g->scanout_rect = req.rect;
-        paint(g);
+        if (changed) paint(g);
         return OK;
     }
     case TRANSFER_TO_HOST: {
@@ -234,6 +410,11 @@ static uint32_t execute(Gpu *g, const HvVirtqElem *e, Header *reply, uint32_t *b
         Resource *r = find_resource(g, req.id);
         if (!req.id || !r) return ERR_RESOURCE;
         if (req.offset > (uint64_t)r->width * r->height * 4) return ERR_PARAMETER;
+        if (r->renderer_owned) {
+            HvVirglBox box = {req.rect.x, req.rect.y, 0, req.rect.w, req.rect.h, 1};
+            return g->renderer->write(r->id, 0, 0, r->width * 4, 0, &box, req.offset, NULL, 0)
+                ? ERR_PARAMETER : OK;
+        }
         return transfer(g, r, req.rect, req.offset) == 0 ? OK : ERR_PARAMETER;
     }
     case FLUSH: {
@@ -256,6 +437,7 @@ static void notify(HvVirtio *v, int q) {
     Gpu *g = v->dev;
     HvVirtqElem e;
     int any = 0;
+    if (g->renderer) hv_virgl_enter();
     while (hv_virtq_pop(v, q, &e) > 0) {
         Header h;
         uint32_t bytes = 0;
@@ -263,6 +445,9 @@ static void notify(HvVirtio *v, int q) {
             if (q == 0 && hv_virtq_writable(&e) >= sizeof h) {
                 bytes = sizeof h;
                 h.type = execute(g, &e, &h, &bytes);
+                // Only fenced responses promise GPU completion. Unfenced commands
+                // can stay queued, avoiding a GPU/CPU stall after every command.
+                if (g->renderer && (h.flags & 1)) g->renderer->finish();
                 h.flags &= 1;
                 hv_virtq_write(v, &e, 0, &h, sizeof h);
             }
@@ -270,6 +455,7 @@ static void notify(HvVirtio *v, int q) {
         hv_virtq_push(v, q, &e, bytes);
         any = 1;
     }
+    if (g->renderer) hv_virgl_release_current();
     if (any) hv_virtio_interrupt(v);
 }
 
@@ -281,14 +467,34 @@ int hv_virtio_gpu_create(HvMachine *m, HvPcie *bus, HvFbDisplay *fb,
     if (!g->pixels) { free(g); return -1; }
     g->width = width;
     g->height = height;
-    const int advertise_edid = display_hz > 60 && display_hz <= 120;
-    if (advertise_edid) build_edid(g, display_hz);
-    hv_virtio_init(&g->v, m, 16, 0x038000, 2, advertise_edid ? 1u << 1 : 0);
+    memset(advertised_modes, 0, sizeof advertised_modes);
+    const char *modes = getenv("HV_VIRTIO_ALTERNATE_MODES");
+    if (modes) {
+        unsigned w[3], h[3];
+        if (sscanf(modes, "%ux%u %ux%u %ux%u", &w[0], &h[0], &w[1], &h[1], &w[2], &h[2]) == 6) {
+            for (unsigned i = 0; i < 3; i++) {
+                if (w[i] >= 320 && h[i] >= 320 && w[i] <= MAX_WIDTH && h[i] <= MAX_HEIGHT) {
+                    advertised_modes[i][0] = w[i];
+                    advertised_modes[i][1] = h[i];
+                }
+            }
+        }
+    }
+    active_refresh_hz = display_hz > 60 && display_hz <= 120 ? display_hz : 60;
+    build_edid(g, active_refresh_hz);
+    g->renderer = hv_virgl_init();
+    uint64_t features = 1u << 1;
+    if (g->renderer) features |= 1;
+    hv_virtio_init(&g->v, m, 16, 0x038000, 2, features);
     g->v.dev = g;
     g->v.notify = notify;
+    g->v.config_write = gpu_config_write;
     g->v.config_len = 16;
+    if (g->renderer) g->v.config[12] = 2; /* VIRGL and VIRGL2 capsets */
     g->v.config[8] = 1; /* num_scanouts */
     g->fb = fb;
+    atomic_store(&requested_size, 0);
+    active_gpu = g;
     hv_pcie_attach(bus, &g->v.pci);
     return 0;
 }

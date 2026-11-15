@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Full-screen guest display and serial console.
 struct SessionView: View {
@@ -7,6 +8,10 @@ struct SessionView: View {
     @State private var showHelp = false
     @State private var desktop = true
     @State private var controlsVisible = false
+    @State private var importingFile = false
+    @State private var toolsMessage: String?
+    @State private var restartPrompt = false
+    @AppStorage("guestDisplayProfile") private var displayProfile = "automatic"
     @AppStorage("guestTouchRotation") private var touchRotation = 0
 
     private func send(_ text: String) {
@@ -29,37 +34,101 @@ struct SessionView: View {
         }
     }
 
-    private var controls: some View {
-        HStack {
-            Button(desktop ? "Console" : "Phosh") {
-                desktop.toggle()
-                controlsVisible = false
-                vm.systemKeyboardVisible = false
+    private func importFile(_ url: URL) {
+        do {
+            try SessionTools.addFile(url)
+            toolsMessage = "File saved to Shared/Files. Open dav://10.0.2.4/Files in Linux Files."
+        } catch {
+            toolsMessage = error.localizedDescription
+        }
+    }
+
+    private func runAction(_ action: String) {
+        do { try SessionTools.send(action) }
+        catch { toolsMessage = error.localizedDescription }
+    }
+
+    private var tools: some View {
+        Menu {
+            Picker("Display profile", selection: $displayProfile) {
+                Text("Automatic").tag("automatic")
+                Text("Smooth").tag("smooth")
+                Text("Sharp").tag("sharp")
             }
-            Spacer()
-            if vm.isVMRunning {
-                Button { WinIOSBridge.shared.pressPowerButton() } label: { Image(systemName: "power") }
-                    .accessibilityLabel("Shut down Linux")
+            Button("Send iPhone clipboard to Linux", systemImage: "clipboard") {
+                if let text = UIPasteboard.general.string, !text.isEmpty {
+                    WinIOSBridge.shared.publishClipboard(text)
+                    runAction("paste")
+                } else { toolsMessage = "The iPhone clipboard has no text." }
             }
-            Button { vm.systemKeyboardVisible.toggle() } label: { Image(systemName: "keyboard") }
-                .accessibilityLabel("Toggle keyboard")
-            Button { showHelp = true } label: { Image(systemName: "info.circle") }
-                .accessibilityLabel("Help")
-            if desktop && vm.isVMRunning {
-                Menu {
-                    Picker("Phosh display orientation", selection: $touchRotation) {
-                        Text("Normal").tag(0)
-                        Text("90° counterclockwise").tag(90)
-                        Text("180°").tag(180)
-                        Text("90° clockwise").tag(270)
+            Button("Copy Linux clipboard to iPhone", systemImage: "doc.on.clipboard") {
+                _ = WinIOSBridge.shared.takeGuestClipboard()
+                runAction("copy")
+                Task { @MainActor in
+                    for _ in 0..<15 {
+                        try? await Task.sleep(for: .milliseconds(300))
+                        if let text = WinIOSBridge.shared.takeGuestClipboard(), !text.isEmpty {
+                            UIPasteboard.general.string = text
+                            toolsMessage = "Linux clipboard copied."
+                            return
+                        }
                     }
-                } label: {
-                    Image(systemName: "rotate.left")
+                    toolsMessage = "No Linux clipboard text received."
                 }
-                .accessibilityLabel("Touch orientation")
-                Button { controlsVisible = false } label: { Image(systemName: "xmark") }
-                    .accessibilityLabel("Close controls")
             }
+            Button("Send file to Linux", systemImage: "folder") { importingFile = true }
+            Button("Restart Phosh", systemImage: "arrow.clockwise") { restartPrompt = true }
+        } label: {
+            toolbarIcon("ellipsis.circle")
+        }
+        .accessibilityLabel("Linux tools")
+    }
+
+    private func toolbarIcon(_ name: String) -> some View {
+        Image(systemName: name).frame(minWidth: 28, minHeight: 30)
+    }
+
+    private var controls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button {
+                    desktop.toggle()
+                    controlsVisible = false
+                    vm.systemKeyboardVisible = false
+                } label: {
+                    Label(desktop ? "Console" : "Phosh", systemImage: desktop ? "terminal" : "display")
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+                Spacer(minLength: 0)
+                if desktop {
+                    Button { controlsVisible = false } label: { Image(systemName: "xmark") }
+                        .accessibilityLabel("Close controls")
+                }
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 44), spacing: 8)], spacing: 8) {
+                Button { WinIOSBridge.shared.pressPowerButton() } label: { toolbarIcon("power") }
+                    .accessibilityLabel("Shut down Linux")
+                Button { vm.systemKeyboardVisible.toggle() } label: { toolbarIcon("keyboard") }
+                    .accessibilityLabel("Toggle keyboard")
+                Button { showHelp = true } label: { toolbarIcon("info.circle") }
+                    .accessibilityLabel("Help")
+                if desktop {
+                    tools
+                    Menu {
+                        Picker("Phosh display orientation", selection: $touchRotation) {
+                            Text("Normal").tag(0)
+                            Text("90° counterclockwise").tag(90)
+                            Text("180°").tag(180)
+                            Text("90° clockwise").tag(270)
+                        }
+                    } label: {
+                        toolbarIcon("rotate.left")
+                    }
+                    .accessibilityLabel("Touch orientation")
+                }
+            }
+            .labelStyle(.iconOnly)
         }
         .buttonStyle(.bordered)
         .tint(AlpineTheme.accent)
@@ -73,7 +142,7 @@ struct SessionView: View {
             }
 
             ZStack {
-                SerialTerminalView(keyboardVisible: $vm.systemKeyboardVisible)
+                SerialTerminalView(keyboardVisible: $vm.systemKeyboardVisible, onOutput: vm.observeGuestSerial)
                     .opacity(desktop ? 0 : 1)
                     .allowsHitTesting(!desktop)
                 if desktop && vm.isVMRunning {
@@ -123,14 +192,29 @@ struct SessionView: View {
             }
         }
         .overlay(alignment: .bottom) {
-            if vm.isVMRunning && vm.consolePassword != nil && vm.softwareStatus != .ready {
-                Text(softwareStatusLabel)
+            if vm.isVMRunning && (vm.guestToolsStatus != nil || (vm.consolePassword != nil && vm.softwareStatus != .ready)) {
+                Text(vm.guestToolsStatus ?? softwareStatusLabel)
                     .font(.caption)
                     .padding(8)
                     .background(.regularMaterial, in: Capsule())
                     .padding()
                     .allowsHitTesting(false)
             }
+        }
+        .onChange(of: displayProfile) { _, _ in WinIOSBridge.shared.refreshGuestDisplay() }
+        .fileImporter(isPresented: $importingFile, allowedContentTypes: [.item]) { result in
+            do { importFile(try result.get()) }
+            catch { toolsMessage = error.localizedDescription }
+        }
+        .onOpenURL { url in
+            if url.isFileURL { importFile(url) }
+        }
+        .alert("Linux tools", isPresented: Binding(get: { toolsMessage != nil },
+                                                   set: { if !$0 { toolsMessage = nil } })) {
+            Button("OK") { toolsMessage = nil }
+        } message: { Text(toolsMessage ?? "") }
+        .confirmationDialog("Restart the Linux desktop? Open Linux windows will close.", isPresented: $restartPrompt) {
+            Button("Restart Phosh", role: .destructive) { runAction("restart") }
         }
         .statusBarHidden(true)
         .preferredColorScheme(.dark)

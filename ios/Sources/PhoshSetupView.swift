@@ -13,8 +13,10 @@ struct PhoshSetupView: View {
     @AppStorage("phoshManifestURL") private var savedAddress = ""
     @AppStorage("phoshManifestDefault") private var previousDefault = ""
     @State private var address = ""
+    @State private var customPassword = ""
     @State private var selected = PhoshApp.defaults
     @State private var showSource = false
+    @State private var confirmRestore = false
 
     private var configuredSource: String {
         Bundle.main.object(forInfoDictionaryKey: "AlpineImageManifestURL") as? String ?? ""
@@ -32,6 +34,7 @@ struct PhoshSetupView: View {
                 } else if vm.hasMachine {
                     machineStatus
                 } else {
+                    passwordOptions
                     software
                     source
                 }
@@ -55,6 +58,10 @@ struct PhoshSetupView: View {
                 .padding(.vertical, 10)
                 .frame(maxWidth: .infinity)
                 .background(AlpineTheme.background)
+        }
+        .confirmationDialog("Restore the saved Linux disk? Changes since the snapshot will be lost.",
+                            isPresented: $confirmRestore) {
+            Button("Restore disk", role: .destructive) { vm.diskSnapshot(restore: true) }
         }
         .tint(AlpineTheme.accent)
         .onAppear {
@@ -129,6 +136,24 @@ struct PhoshSetupView: View {
         }
     }
 
+    private var passwordOptions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Linux password").font(.title3.weight(.semibold))
+            SecureField("Optional password", text: $customPassword)
+                .textContentType(.newPassword)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textFieldStyle(.roundedBorder)
+            Text(PhoshInstaller.validCustomPassword(customPassword)
+                 ? "Used for user login and doas. Leave blank to generate one."
+                 : "Use up to 64 printable ASCII characters without a colon.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .background(AlpineTheme.panel, in: RoundedRectangle(cornerRadius: 15))
+    }
+
     private var source: some View {
         DisclosureGroup("Image source", isExpanded: $showSource) {
             TextField("HTTPS manifest URL", text: $address)
@@ -155,6 +180,14 @@ struct PhoshSetupView: View {
             } else if !vm.isJITLive {
                 Text(vm.jitStatusText).font(.caption).foregroundStyle(.secondary)
             }
+            if !vm.isUnpacking {
+                Button(vm.hasDiskSnapshot ? "Replace disk snapshot" : "Save disk snapshot") {
+                    vm.diskSnapshot(restore: false)
+                }
+                if vm.hasDiskSnapshot {
+                    Button("Restore disk snapshot") { confirmRestore = true }
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(18)
@@ -178,9 +211,10 @@ struct PhoshSetupView: View {
         } else {
             primary("Download and install", symbol: "arrow.down.to.line") {
                 savedAddress = address
-                vm.downloadPhosh(address: address, apps: selected)
+                vm.downloadPhosh(address: address, apps: selected, customPassword: customPassword)
+                customPassword = ""
             }
-            .disabled(PhoshInstaller.sourceURL(address) == nil)
+            .disabled(PhoshInstaller.sourceURL(address) == nil || !PhoshInstaller.validCustomPassword(customPassword))
         }
     }
 

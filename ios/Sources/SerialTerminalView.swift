@@ -5,9 +5,11 @@ import UIKit
 
 struct SerialTerminalView: UIViewRepresentable {
     @Binding var keyboardVisible: Bool
+    var onOutput: (Data) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeUIView(context: Context) -> TerminalView {
+        context.coordinator.onOutput = onOutput
         let view = TerminalView(frame: .zero, font: .monospacedSystemFont(ofSize: 12, weight: .regular))
         view.terminalDelegate = context.coordinator
         view.nativeBackgroundColor = .black
@@ -16,6 +18,7 @@ struct SerialTerminalView: UIViewRepresentable {
         return view
     }
     func updateUIView(_ view: TerminalView, context: Context) {
+        context.coordinator.onOutput = onOutput
         if keyboardVisible && !view.isFirstResponder { view.becomeFirstResponder() }
         if !keyboardVisible && view.isFirstResponder { view.resignFirstResponder() }
     }
@@ -27,12 +30,16 @@ struct SerialTerminalView: UIViewRepresentable {
         var timer: Timer?
         weak var view: TerminalView?
         var pending = Data()
+        var onOutput: (Data) -> Void = { _ in }
         func start(_ view: TerminalView) {
             self.view = view
             timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
                 guard let self = self, let view = self.view else { return }
                 let data = WinIOSBridge.shared.readSerial()
-                if !data.isEmpty { view.feed(byteArray: Array(data)[...]) }
+                if !data.isEmpty {
+                    self.onOutput(data)
+                    view.feed(byteArray: Array(data)[...])
+                }
                 if !self.pending.isEmpty {
                     let n = WinIOSBridge.shared.sendSerial(self.pending)
                     self.pending.removeFirst(Int(n))

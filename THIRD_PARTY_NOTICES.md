@@ -218,3 +218,18 @@ Vendored sources use a local iOS-only package manifest without desktop process d
 ## Release source bundles
 
 The app sources are available in the Git tag for the release. The dependency archive supplies GLib with GVDB, libffi, libslirp, proxy-libintl, PCRE2 and its Meson patch with their upstream notices. To rebuild or relink the app, unpack the archive at the repository root, optionally replace or modify the relevant source, and run scripts/build_alpine_ios.sh. The build uses the included inputs in work/ios_deps_build.
+
+
+## Experimental 3D backend
+
+The iOS graphics dependency staging script downloads the public UTM v5.0.8 IPA and verifies its SHA-256 before extracting the ARM64 frameworks. VirGL decodes the guest's rendering commands, ANGLE translates OpenGL ES to Metal, and libepoxy resolves GL functions. The Vulkan loader is a runtime dependency of that VirGL build.
+
+The bundled guest graphics overlay is built from Mesa 26.1.6 with the VirGL Gallium driver enabled. Its upstream license text is included in the archive at `usr/local/alpineios-mesa/share/licenses/Mesa.txt`. The build recipe verifies the source archive with SHA-512. Source: https://mesa.freedesktop.org/archive/mesa-26.1.6.tar.xz. Mesa license information: https://docs.mesa3d.org/license.html.
+
+- UTM release and packaging by osy and UTM contributors. https://github.com/utmapp/UTM/releases/tag/v5.0.8
+- virglrenderer by Red Hat and contributors, MIT license. UTM source revision 451505ad0aa449290f2c0672da6877d57ee770e5. https://github.com/utmapp/virglrenderer
+- ANGLE by Google and contributors, BSD-3-Clause with third-party components. UTM WebKit revision ed78ab6e1a37f4f11583a0bd038f22ec91f3ff10. https://github.com/utmapp/WebKit/tree/ed78ab6e1a37f4f11583a0bd038f22ec91f3ff10/Source/ThirdParty/ANGLE
+- libepoxy by Eric Anholt and contributors, MIT license. UTM revision bf98587477fe68d07b93319ece7b40a7d0e2eabe. https://github.com/utmapp/libepoxy
+- Vulkan Loader by Khronos and contributors, Apache-2.0. UTM revision 6df86907be582927507637f3f6003ea58bc34517. https://github.com/osy/Vulkan-Loader
+
+The iOS app includes the framework license texts from `ThirdParty/GraphicsLicenses`. The framework binaries are staged under ignored `ios/deps`. The GNOME processor fallback is built inside the guest against libgtop and GLib. Its source is included in scripts/guest/update_guest_tools.sh.

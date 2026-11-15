@@ -33,8 +33,10 @@ int hv_winvm_create(const HvWinVmConfig *cfg, char *err, size_t errlen);
 void hv_winvm_start(int spawn_cpu0, void (*on_exit)(int reason));
 int hv_winvm_run_cpu0(void);
 void hv_winvm_stop(void);
+void hv_winvm_set_paused(int paused);
 void hv_winvm_power_button(void);
 void hv_winvm_flush_disks(void);
+void hv_winvm_audio_stats(uint64_t *written, uint64_t *played);
 /* Thread-safe UART transport. Input is delivered by the CPU's board poll. */
 size_t hv_winvm_serial_read(uint8_t *bytes, size_t capacity);
 size_t hv_winvm_serial_write(const uint8_t *bytes, size_t length);
@@ -43,6 +45,7 @@ size_t hv_winvm_serial_write(const uint8_t *bytes, size_t length);
 void hv_winvm_set_display_layer(void *ca_metal_layer);
 int hv_winvm_display_size(uint32_t *w, uint32_t *h);
 uint64_t hv_winvm_display_frames(void);
+uint64_t hv_winvm_native_display_frames(void);
 int hv_winvm_save_png(const char *path);
 
 /* Input hooks (any thread) */

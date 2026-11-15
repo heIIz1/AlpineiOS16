@@ -75,7 +75,7 @@ typedef struct HvWinVirt {
     HvFbDisplay *fb;
     HvPcie *pcie;
     HvVirtioNet *net;
-    HvVirtioInput *keyboard, *touchscreen;
+    HvVirtioInput *keyboard, *touchscreen, *mouse;
     HvNvme *nvme0;
     HvNvme *nvme1;
     HvXhci *usb;

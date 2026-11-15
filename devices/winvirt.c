@@ -240,8 +240,9 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
         if (hv_virtio_gpu_create(m, b->pcie, b->fb, width, height, display_hz)) return -1;
         b->keyboard = hv_virtio_input_create(m, b->pcie, HV_VINPUT_KEYBOARD);
         b->touchscreen = hv_virtio_input_create(m, b->pcie, HV_VINPUT_TOUCHSCREEN);
+        b->mouse = hv_virtio_input_create(m, b->pcie, HV_VINPUT_MOUSE);
     }
-    (void)enable_sound;
+    if (enable_sound && mode) b->snd = hv_virtio_snd_create(m, b->pcie);
 
     m->tick = tick;
     m->tick_opaque = b;

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "winvm.h"
+#include "virtio_gpu.h"
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <TargetConditionals.h>
@@ -30,6 +31,16 @@ static HvDisk disk1 = {.fd = -1};
 static int net_on;
 static int share_on;
 static _Atomic int stop_requested;
+static pthread_mutex_t pause_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t pause_changed = PTHREAD_COND_INITIALIZER;
+static int paused;
+
+void hv_winvm_set_paused(int value) {
+    pthread_mutex_lock(&pause_lock);
+    paused = value;
+    if (!paused) pthread_cond_broadcast(&pause_changed);
+    pthread_mutex_unlock(&pause_lock);
+}
 
 static os_unfair_lock display_lock = OS_UNFAIR_LOCK_INIT;
 static CFTypeRef display_layer;
@@ -88,6 +99,11 @@ size_t hv_winvm_serial_write(const uint8_t *bytes, size_t length) {
 }
 
 static void board_poll(void) {
+    pthread_mutex_lock(&pause_lock);
+    while (paused && !atomic_load(&stop_requested))
+        pthread_cond_wait(&pause_changed, &pause_lock);
+    pthread_mutex_unlock(&pause_lock);
+    hv_virtio_gpu_poll();
     os_unfair_lock_lock(&serial_lock);
     while (board.uart && serial_in_count && hv_pl011_receive(board.uart, serial_input[serial_in_head])) {
         serial_in_head = (serial_in_head + 1) % sizeof serial_input;
@@ -178,6 +194,11 @@ uint64_t hv_winvm_display_frames(void) {
     return fb ? hv_fb_metal_frames(fb) : 0;
 }
 
+uint64_t hv_winvm_native_display_frames(void) {
+    HvFbDisplay *fb = atomic_load_explicit(&display_fb, memory_order_acquire);
+    return fb ? hv_fb_metal_native_frames(fb) : 0;
+}
+
 int hv_winvm_save_png(const char *path) {
     HvFbDisplay *fb = atomic_load_explicit(&display_fb, memory_order_acquire);
     return fb ? hv_fb_save_png(fb, path) : -1;
@@ -247,6 +268,7 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
         else fprintf(stderr, "winvm: user-mode SLIRP networking unavailable\n");
     }
     if (board.hda && c->enable_sound) hv_audio_attach_hda(board.hda);
+    if (board.snd && c->enable_sound) hv_audio_attach(board.snd);
     board.poll = board_poll;
 
     os_unfair_lock_lock(&display_lock);
@@ -381,11 +403,17 @@ void hv_winvm_start(int spawn_cpu0, void (*on_exit)(int reason)) {
 
 void hv_winvm_stop(void) {
     atomic_store(&stop_requested, 1);
+    hv_winvm_set_paused(0);
     hv_audio_shutdown();
     for (int i = 0; i < ncpus; i++) cpus[i].halted = 3;
     hv_machine_kick_all(&m);
     for (int i = 0; i < ncpus; i++) hv_cpu_wake(&cpus[i]);
     hv_winvm_flush_disks();
+}
+
+void hv_winvm_audio_stats(uint64_t *written, uint64_t *played) {
+    *written = board.snd ? atomic_load(&board.snd->written) : 0;
+    *played = board.snd ? atomic_load(&board.snd->consumed) : 0;
 }
 
 void hv_winvm_power_button(void) {
@@ -412,6 +440,11 @@ void hv_winvm_tablet(double x_norm, double y_norm, uint8_t buttons, int8_t wheel
     if (y_norm > 1.0) y_norm = 1.0;
     int ax = (int)(x_norm * 32767.0 + 0.5);
     int ay = (int)(y_norm * 32767.0 + 0.5);
+    if (wheel && board.mouse) {
+        hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_WHEEL, wheel);
+        hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
+        return;
+    }
     if (board.touchscreen) {
         hv_virtio_input_send(board.touchscreen, HV_EV_ABS, HV_ABS_X, ax);
         hv_virtio_input_send(board.touchscreen, HV_EV_ABS, HV_ABS_Y, ay);

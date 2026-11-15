@@ -22,6 +22,7 @@
 #define IN_BUFFER_FRAMES 960 /* 20 ms @ 48 kHz */
 
 static pthread_mutex_t audio_mu = PTHREAD_MUTEX_INITIALIZER;
+static void vsnd_shutdown_locked(void);
 
 /* ---- HDA Playback (Output AudioUnit) ---- */
 static AudioComponentInstance hda_out_unit;
@@ -214,10 +215,11 @@ void hv_audio_shutdown(void) {
         hda_out_running = 0;
     }
     dispose_in_locked();
+    vsnd_shutdown_locked();
     pthread_mutex_unlock(&audio_mu);
 }
 
-/* ---- Legacy virtio-snd compatibility ---- */
+/* ---- VirtIO sound playback ---- */
 static AudioComponentInstance vsnd_unit;
 static int vsnd_running;
 static unsigned vsnd_ch, vsnd_fmt, vsnd_rate;
@@ -231,7 +233,7 @@ static OSStatus vsnd_render(void *ref, AudioUnitRenderActionFlags *flags, const 
     return noErr;
 }
 
-static int vsnd_start(void *opaque, unsigned channels, unsigned format, unsigned rate_hz) {
+static int vsnd_start_locked(void *opaque, unsigned channels, unsigned format, unsigned rate_hz) {
     HvVirtioSnd *d = opaque;
     if (vsnd_unit && (channels != vsnd_ch || format != vsnd_fmt || rate_hz != vsnd_rate)) {
         AudioOutputUnitStop(vsnd_unit);
@@ -269,10 +271,28 @@ static int vsnd_start(void *opaque, unsigned channels, unsigned format, unsigned
     return vsnd_running ? 0 : -1;
 }
 
+static int vsnd_start(void *opaque, unsigned channels, unsigned format, unsigned rate_hz) {
+    pthread_mutex_lock(&audio_mu);
+    int result = vsnd_start_locked(opaque, channels, format, rate_hz);
+    pthread_mutex_unlock(&audio_mu);
+    return result;
+}
+
+static void vsnd_shutdown_locked(void) {
+    if (!vsnd_unit) return;
+    AudioOutputUnitStop(vsnd_unit);
+    AudioUnitUninitialize(vsnd_unit);
+    AudioComponentInstanceDispose(vsnd_unit);
+    vsnd_unit = NULL;
+    vsnd_running = 0;
+}
+
 static void vsnd_stop(void *opaque) {
     (void)opaque;
+    pthread_mutex_lock(&audio_mu);
     if (vsnd_unit && vsnd_running) AudioOutputUnitStop(vsnd_unit);
     vsnd_running = 0;
+    pthread_mutex_unlock(&audio_mu);
 }
 
 void hv_audio_attach(HvVirtioSnd *d) {

@@ -87,6 +87,14 @@ static uint64_t g_guest_ram_bytes;
 static atomic_bool g_jit_live;
 static char g_status[256] = "Not initialized";
 
+uint64_t winios_guest_ram_target_mb(void) {
+    uint64_t physical = 0;
+    size_t length = sizeof physical;
+    if (sysctlbyname("hw.memsize", &physical, &length, NULL, 0) != 0) return 1536;
+    // Devices sold with 6 GB or more may expose slightly less usable physical RAM.
+    return physical >= (5ull << 30) ? 2048 : 1536;
+}
+
 static void prealloc_ledger_exempt_ram(void) {
     if (g_guest_ram) return;
     uint64_t phys_mem = 0;
@@ -94,9 +102,11 @@ static void prealloc_ledger_exempt_ram(void) {
     sysctlbyname("hw.memsize", &phys_mem, &len, NULL, 0);
     uint64_t phys_mb = phys_mem >> 20;
     /* Size Guest RAM to fit comfortably within iOS 36-bit user VA ceiling alongside TXM JIT RX/RW + JIT tables */
-    static const uint64_t candidates_mb[] = {1536};
+    static const uint64_t candidates_mb[] = {2048, 1536};
+    uint64_t target_mb = winios_guest_ram_target_mb();
     for (size_t i = 0; i < sizeof(candidates_mb) / sizeof(candidates_mb[0]); i++) {
         uint64_t mb = candidates_mb[i];
+        if (mb > target_mb) continue;
         if (phys_mb > 0 && mb + 2560 > phys_mb) continue;
         uint8_t *p = hv_alloc_no_footprint(mb << 20);
         if (p) {

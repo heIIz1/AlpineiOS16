@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 bash scripts/build_ios_deps.sh
+python3 scripts/prepare_ios_graphics.py
+python3 scripts/prepare_guest_graphics.py
 make -j"$(sysctl -n hw.ncpu)" ios-lib
 xcodegen generate --spec ios/project.yml
 

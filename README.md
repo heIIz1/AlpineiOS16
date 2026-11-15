@@ -12,13 +12,15 @@ AlpineiOS runs a local ARM64 postmarketOS virtual machine inside an iPhone app. 
 - **Build and launch:** Apple silicon Mac, Xcode with support for the connected iPhone (tested with Xcode 27.2), Homebrew, an Apple development team for signing and Developer Mode on the iPhone.
 - **Storage and network:** Allow at least 5 GB of free space on the phone for the roughly 1.9 GB download, unpacking and apps. The initial setup and package installs need internet access.
 
-The VM uses one CPU, 1.5 GB of RAM, software rendering and a portrait 400 × 864 display. Guest audio is currently disabled.
+The VM uses one CPU and a display sized to match the app window, with automatic Phosh scaling and landscape support on iPad. RAM is selected from the host capacity, with 2 GB on devices in the 6 GB class or higher and 1.5 GB on smaller devices or if the larger preallocation fails. The local experimental graphics path uses VirGL, ANGLE and Metal. Audio output uses VirtIO Sound and the iOS audio session.
+
+The experimental build bundles a Mesa 26.1.6 guest driver with VirGL enabled. The build script prepares it in a separate ARM64 QEMU VM on the Mac; the first build needs internet access, about 4 GB of available RAM and several minutes. Guest installation uses the bundled archive through the internal shared-files service. Native Metal scanout copies frames on the GPU and avoids the CPU readback path when supported. Desktop animations remain enabled.
 
 The download includes Phosh and Settings. Firefox, Files (Nautilus), and GNOME Console are selected by default. Telegram Desktop, Mousepad, and htop are optional.
 
 ## Download and install from the app
 
-On the first launch, choose the apps you want and tap **Download and install**. The default image is hosted on GitHub Releases. [Phosh image downloads](https://github.com/Lumid-Off/AlpineiOS-images/releases/tag/phosh-26.06-r1) AlpineiOS verifies the assets with SHA-256, unpacks the disk, then boots when JIT is available. The guest downloads the selected apps after boot. Its generated console password is in **Help**.
+On the first launch, choose the apps you want and tap **Download and install**. The default image is hosted on GitHub Releases. [Phosh image downloads](https://github.com/Lumid-Off/AlpineiOS-images/releases/tag/phosh-26.06-r1) AlpineiOS verifies the assets with SHA-256, unpacks the disk, then boots when JIT is available. The guest downloads the selected apps after boot. You can choose a local password for `user` and `doas`, or leave it blank to generate one. The current password is in **Help**.
 
 Set `ALPINE_IMAGE_MANIFEST_URL` at build time to use a different default URL. To create and stage the assets for your own server, run these commands on an Apple silicon Mac with QEMU and Python installed.
 
@@ -65,6 +67,10 @@ Run the build script without `ALPINE_DEVELOPMENT_TEAM` to produce an unsigned `b
 
 - **Phosh app grid** — swipe up with two fingers from inside the desktop, or tap with three fingers and choose **Apps**.
 - **App controls** — tap with three fingers. The panel includes the serial console, iOS keyboard, touch orientation and Linux shutdown.
+- **Linux tools** — open the three-finger controls, then choose **…** for display profiles, desktop restart, text clipboard transfer or file import. Imported files appear in **Shared/Files**, accessible from Linux Files at `dav://10.0.2.4/Files`.
+- **Disk snapshot** — shut down Linux and use the setup screen to save or restore one disk snapshot. Restoring replaces the active Linux disk.
+- **Keyboard** — use Option–Command–A for the Linux app grid and Option–Command–L for the controls when the Linux view has keyboard focus.
+- **Pause and resume** — switching away pauses the running guest. Returning resumes it while iOS keeps AlpineiOS in memory.
 - **Rotate in Phosh** — if taps are offset, match the touch orientation to the guest display from the controls.
 - **Return to iOS** — swipe up from the bottom edge. Use the power button in the controls to shut down Linux first if you're done with the VM.
 
@@ -72,7 +78,7 @@ Linux exposes the iPhone model through SMBIOS and DMI. Read /sys/class/dmi/id/pr
 
 The host also supplies JSON at http://10.0.2.4/.henge/host and http://10.0.2.4/.henge/battery. These endpoints expose the iPhone identifier, known chip name, physical core count, iOS version, display capability and battery state.
 
-On ProMotion devices the presenter requests up to the screen’s maximum refresh rate, and the VirtIO display advertises 120 Hz and 60 Hz modes. The actual display cadence and guest frame rate depend on iOS scheduling, power state and VM load.
+On ProMotion devices the presenter requests up to the screen’s maximum refresh rate, and the VirtIO display advertises 120 Hz and 60 Hz modes. The actual display cadence and guest frame rate depend on iOS scheduling, power state and VM load. The app updates the guest tools after login, including a libgtop fallback that lets GNOME Settings read the Apple chip name from DMI.
 
 ## Development, credits and licenses
 

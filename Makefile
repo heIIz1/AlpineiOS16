@@ -16,7 +16,7 @@ DEV = $(B)/acpi.o $(B)/fb_display.o $(B)/fb_metal.o $(B)/fdt.o $(B)/fw_cfg.o $(B
       $(B)/virtio.o $(B)/virtio_blk.o $(B)/virtio_gpu.o $(B)/virtio_input.o $(B)/virtio_net.o $(B)/virtio_snd.o \
       $(B)/winvirt.o $(B)/xhci.o
 
-VM_HOST = $(B)/winvm.o $(B)/net_slirp.o $(B)/share.o $(B)/audio_mac.o $(B)/hvsparse.o
+VM_HOST = $(B)/winvm.o $(B)/net_slirp.o $(B)/share.o $(B)/audio_mac.o $(B)/virgl_ios.o $(B)/hvsparse.o
 
 MAC_FRAMEWORKS = -framework Cocoa -framework Foundation -framework QuartzCore -framework Metal \
                  -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers \
@@ -33,6 +33,8 @@ $(B)/mmu.o: core/mmu.c core/*.h host/*.h | $(B)
 $(B)/net_slirp.o: host/net_slirp.c host/*.h core/*.h devices/*.h | $(B)
 	$(CC) $(CFLAGS) $(SLIRP_CFLAGS) -c $< -o $@
 $(B)/fb_metal.o: devices/fb_metal.m devices/*.h core/*.h host/*.h | $(B)
+	$(CC) $(OBJCFLAGS) -c $< -o $@
+$(B)/virgl_ios.o: host/virgl_ios.m host/virgl.h
 	$(CC) $(OBJCFLAGS) -c $< -o $@
 $(B)/main_mac.o: host/main_mac.m host/*.h core/*.h devices/*.h | $(B)
 	$(CC) $(OBJCFLAGS) -c $< -o $@
@@ -81,7 +83,7 @@ IOS_C_SRC = $(wildcard core/*.c) \
             host/jit_region.c host/disk.c host/winvm.c host/net_slirp.c host/share.c \
             host/audio_mac.c host/hvsparse.c host/prof_ios.c \
             $(wildcard devices/*.c)
-IOS_OBJ = $(patsubst %.c,$(IB)/%.o,$(IOS_C_SRC)) $(IB)/host/enter.o $(IB)/devices/fb_metal.o
+IOS_OBJ = $(patsubst %.c,$(IB)/%.o,$(IOS_C_SRC)) $(IB)/host/enter.o $(IB)/devices/fb_metal.o $(IB)/host/virgl_ios.o
 
 $(IB)/core/mmu.o: core/mmu.c core/*.h host/*.h devices/*.h
 	@mkdir -p $(dir $@)
@@ -90,6 +92,9 @@ $(IB)/%.o: %.c core/*.h host/*.h devices/*.h
 	@mkdir -p $(dir $@)
 	$(IOS_CC) $(IOS_CFLAGS) -c $< -o $@
 $(IB)/devices/fb_metal.o: devices/fb_metal.m devices/*.h core/*.h host/*.h
+	@mkdir -p $(dir $@)
+	$(IOS_CC) $(IOS_OBJCFLAGS) -c $< -o $@
+$(IB)/host/virgl_ios.o: host/virgl_ios.m host/virgl.h
 	@mkdir -p $(dir $@)
 	$(IOS_CC) $(IOS_OBJCFLAGS) -c $< -o $@
 $(IB)/host/enter.o: host/enter.S

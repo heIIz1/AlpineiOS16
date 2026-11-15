@@ -72,6 +72,38 @@ struct PhoshInstaller {
         .appendingPathComponent("AlpineiOS", isDirectory: true).appendingPathComponent("console-password")
 
 
+    private static let pendingPasswordStore = passwordStore.deletingLastPathComponent()
+        .appendingPathComponent("pending-console-password")
+    private static let passwordRequest = share.appendingPathComponent(".alpineios-password-request")
+    private static let passwordApplied = share.appendingPathComponent(".alpineios-password-applied")
+
+    static func validCustomPassword(_ value: String) -> Bool {
+        value.utf8.count <= 64 && value.utf8.allSatisfy { (32...126).contains($0) && $0 != 58 }
+    }
+
+    static func pendingPassword() -> String? {
+        try? String(contentsOf: pendingPasswordStore, encoding: .utf8)
+    }
+
+    static func stagePasswordChange() throws {
+        guard let value = pendingPassword() else { return }
+        try Data(value.utf8).write(to: passwordRequest, options: [.atomic, .completeFileProtection])
+    }
+
+    static func finishPasswordChange(verifiedLogin: Bool = false) -> String? {
+        guard verifiedLogin || (try? String(contentsOf: passwordApplied, encoding: .utf8)) == "ok",
+              let password = pendingPassword() else { return nil }
+        do {
+            try Data(password.utf8).write(to: passwordStore, options: [.atomic, .completeFileProtection])
+            try FileManager.default.removeItem(at: pendingPasswordStore)
+            try? FileManager.default.removeItem(at: passwordRequest)
+            try? FileManager.default.removeItem(at: passwordApplied)
+            return password
+        } catch {
+            return nil
+        }
+    }
+
     enum SoftwareStatus: String {
         case installing, retrying, ready
     }
@@ -110,6 +142,7 @@ struct PhoshInstaller {
         address: String,
         apps: Set<PhoshApp>,
         password: String,
+        customPassword: String,
         update: (String) -> Void
     ) async throws {
         guard let source = sourceURL(address) else { throw SetupError.invalidAddress }
@@ -177,15 +210,23 @@ struct PhoshInstaller {
         if fm.fileExists(atPath: target.path) { try fm.removeItem(at: target) }
         try fm.createDirectory(at: share, withIntermediateDirectories: true)
         try? fm.removeItem(at: status)
+        try? fm.removeItem(at: passwordApplied)
+        try? fm.removeItem(at: passwordRequest)
+        try? fm.removeItem(at: pendingPasswordStore)
+        try? fm.removeItem(at: share.appendingPathComponent(".alpineios-tools-status"))
         let choices = PhoshApp.allCases.filter(apps.contains).map(\.rawValue).joined(separator: " ")
         let protection: Data.WritingOptions = [.atomic, .completeFileProtection]
         do {
             try fm.createDirectory(at: passwordStore.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data(password.utf8).write(to: passwordStore, options: protection)
+            if !customPassword.isEmpty {
+                try Data(customPassword.utf8).write(to: pendingPasswordStore, options: protection)
+            }
             try Data("\(password)\n\(choices)\n".utf8).write(to: request, options: protection)
             try fm.moveItem(at: staging, to: target)
         } catch {
             try? fm.removeItem(at: passwordStore)
+            try? fm.removeItem(at: pendingPasswordStore)
             clearRequest()
             throw error
         }

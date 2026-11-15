@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <math.h>
 #import <QuartzCore/QuartzCore.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
@@ -59,6 +60,8 @@ static NSString *const kFbShaderSource =
     dispatch_source_t timer;
 #endif
     _Atomic(uint64_t) framesPresented;
+    _Atomic(uint64_t) nativeFrames;
+    BOOL nativeFrame;
     uint64_t lastHash;
     CGSize lastDrawableSize;
 }
@@ -206,7 +209,7 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
             return;
         }
 
-        if (!texture || texW != w || texH != h) {
+        if (!texture || texW != w || texH != h || (!nativeFrame && texture.pixelFormat != MTLPixelFormatBGRA8Unorm)) {
             MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                                                           width:w
                                                                                          height:h
@@ -217,7 +220,7 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
             texH = h;
         }
 
-        [texture replaceRegion:MTLRegionMake2D(0, 0, w, h)
+        if (!nativeFrame) [texture replaceRegion:MTLRegionMake2D(0, 0, w, h)
                    mipmapLevel:0
                      withBytes:px
                    bytesPerRow:stride];
@@ -232,7 +235,11 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
         float dstAspect = (float)(dsize.width / dsize.height);
         float srcAspect = (float)w / (float)h;
         float scale[2] = {1.0f, 1.0f};
-        if (dstAspect > srcAspect) {
+        // The two panels on a foldable can differ slightly in aspect ratio.
+        // Fill the app window for near-matches, preserving fit for other sizes.
+        if (fabsf(dstAspect / srcAspect - 1.0f) <= 0.03f) {
+            // The default scale already fills the window.
+        } else if (dstAspect > srcAspect) {
             scale[0] = srcAspect / dstAspect;
         } else {
             scale[1] = dstAspect / srcAspect;
@@ -275,6 +282,59 @@ static HvFbMetalPresenter *ensure_presenter(HvFbDisplay *fb) {
     return p;
 }
 
+int hv_fb_metal_publish_texture(HvFbDisplay *fb, void *handle, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    @autoreleasepool {
+        id<MTLTexture> source = (__bridge id<MTLTexture>)handle;
+        if (!source || x > source.width || y > source.height ||
+            w > source.width - x || h > source.height - y) return 0;
+        HvFbMetalPresenter *p = ensure_presenter(fb);
+        if (!p || !p->queue) return 0;
+        os_unfair_lock_lock(&p->lock);
+        if (!p->texture || p->texW != w || p->texH != h || p->texture.pixelFormat != source.pixelFormat) {
+            MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat
+                width:w height:h mipmapped:NO];
+            desc.usage = MTLTextureUsageShaderRead;
+            desc.storageMode = MTLStorageModeShared;
+            p->texture = [p->device newTextureWithDescriptor:desc];
+            p->texW = w; p->texH = h;
+        }
+        id<MTLCommandBuffer> command = [p->queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+        [blit copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x, y, 0)
+            sourceSize:MTLSizeMake(w, h, 1) toTexture:p->texture destinationSlice:0 destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        [command commit];
+        // The guest can reuse its buffer as soon as FLUSH is acknowledged.
+        // Wait for this GPU copy, not for display presentation or a CPU readback.
+        [command waitUntilCompleted];
+        int success = command.status == MTLCommandBufferStatusCompleted;
+        if (success) {
+            p->nativeFrame = YES;
+            pthread_mutex_lock(&fb->mu);
+            fb->width = w; fb->height = h; fb->stride = w * 4; fb->active = 1;
+            if (++fb->frame_generation == 0) fb->frame_generation = 1;
+            pthread_mutex_unlock(&fb->mu);
+            atomic_fetch_add_explicit(&p->nativeFrames, 1, memory_order_relaxed);
+        }
+        os_unfair_lock_unlock(&p->lock);
+        return success;
+    }
+}
+
+void hv_fb_metal_use_pixels(HvFbDisplay *fb) {
+    HvFbMetalPresenter *p = (__bridge HvFbMetalPresenter *)fb->metal;
+    if (!p) return;
+    os_unfair_lock_lock(&p->lock);
+    p->nativeFrame = NO;
+    os_unfair_lock_unlock(&p->lock);
+}
+
+uint64_t hv_fb_metal_native_frames(HvFbDisplay *fb) {
+    HvFbMetalPresenter *p = fb ? (__bridge HvFbMetalPresenter *)fb->metal : nil;
+    return p ? atomic_load_explicit(&p->nativeFrames, memory_order_relaxed) : 0;
+}
+
 void hv_fb_metal_set_layer(HvFbDisplay *fb, void *ca_metal_layer) {
     HvFbMetalPresenter *p = ensure_presenter(fb);
     if (!p) return;
@@ -301,6 +361,25 @@ int hv_fb_save_png(HvFbDisplay *fb, const char *path) {
         BOOL current = fb->fb_host == px && fb->width == w && fb->height == h && fb->stride == stride;
         if (current) memcpy(copy, px, total);
         pthread_mutex_unlock(&fb->mu);
+        HvFbMetalPresenter *presenter = (__bridge HvFbMetalPresenter *)fb->metal;
+        if (presenter) {
+            os_unfair_lock_lock(&presenter->lock);
+            if (presenter->nativeFrame && presenter->texW == w && presenter->texH == h) {
+                id<MTLCommandBuffer> command = [presenter->queue commandBuffer];
+                [command commit];
+                [command waitUntilCompleted];
+                [presenter->texture getBytes:copy bytesPerRow:stride
+                    fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
+                MTLPixelFormat format = presenter->texture.pixelFormat;
+                if (format == MTLPixelFormatRGBA8Unorm || format == MTLPixelFormatRGBA8Unorm_sRGB) {
+                    for (size_t i = 0; i < total; i += 4) {
+                        uint8_t red = copy[i]; copy[i] = copy[i + 2]; copy[i + 2] = red;
+                    }
+                }
+                current = YES;
+            }
+            os_unfair_lock_unlock(&presenter->lock);
+        }
         if (!current) {
             free(copy);
             return -1;

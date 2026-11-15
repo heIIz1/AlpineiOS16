@@ -28,6 +28,7 @@ bool winios_jit_acquire(size_t bytes, bool detach_after);
 bool winios_jit_is_live(void);
 WinIosDualMapping winios_jit_mapping(void);
 void *winios_jit_guest_ram(uint64_t *out_bytes);
+uint64_t winios_guest_ram_target_mb(void);
 const char *winios_jit_status_text(void);
 size_t winios_available_memory_bytes(void);
 

@@ -6,4 +6,6 @@
 
 int hv_virtio_gpu_create(HvMachine *m, HvPcie *bus, HvFbDisplay *fb,
                          uint32_t width, uint32_t height, unsigned display_hz);
+void hv_virtio_gpu_request_size(uint32_t width, uint32_t height);
+void hv_virtio_gpu_poll(void);
 #endif

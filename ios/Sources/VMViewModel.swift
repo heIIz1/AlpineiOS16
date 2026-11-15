@@ -18,6 +18,9 @@ final class VMViewModel: ObservableObject {
     @Published var imageError: String?
     @Published var softwareStatus: PhoshInstaller.SoftwareStatus?
     @Published var consolePassword = PhoshInstaller.storedPassword()
+    @Published var guestToolsStatus: String?
+    @Published var hasDiskSnapshot = FileManager.default.fileExists(atPath: SessionTools.snapshot.path)
+    private let guestTools = GuestToolsUpdate()
     private var installTask: Task<Void, Never>?
 
     private var didAutoLaunchAttempt = false
@@ -30,10 +33,17 @@ final class VMViewModel: ObservableObject {
                 self?.syncFromBridge()
             }
         }
+        guestTools.prepare(password: consolePassword)
         syncFromBridge()
         Task { @MainActor [weak self] in
             self?.onAppBecameActive()
         }
+    }
+
+    func observeGuestSerial(_ data: Data) {
+        guestTools.observe(data)
+        if let password = PhoshInstaller.storedPassword(), consolePassword != password { consolePassword = password }
+        guestToolsStatus = guestTools.status
     }
 
     func syncFromBridge() {
@@ -44,6 +54,9 @@ final class VMViewModel: ObservableObject {
         unpackProgress = b.unpackProgress
         jitStatusText = b.jitStatusText
         vmStatusText = b.vmStatusText
+        guestTools.observe(Data())
+        if let password = PhoshInstaller.storedPassword(), consolePassword != password { consolePassword = password }
+        guestToolsStatus = guestTools.status
         hasMachine = b.hasProvisionedMachine()
         if consolePassword != nil && softwareStatus != .ready {
             softwareStatus = PhoshInstaller.softwareStatus()
@@ -57,10 +70,29 @@ final class VMViewModel: ObservableObject {
             _ = b.tryAcquireJIT(true)
         }
         syncFromBridge()
-        if b.isJITLive && !b.isVMRunning && !b.isUnpacking && installTask == nil && hasMachine && !didAutoLaunchAttempt {
+        if b.isJITLive && !b.isVMRunning && !b.isUnpacking && installTask == nil && imageStatus == nil && hasMachine && !didAutoLaunchAttempt {
             didAutoLaunchAttempt = true
             b.prepareAndStart(with: nil)
             syncFromBridge()
+        }
+    }
+
+    func diskSnapshot(restore: Bool) {
+        guard !isVMRunning, !isUnpacking, imageStatus == nil, hasMachine else { return }
+        let disk = URL(fileURLWithPath: WinIOSBridge.shared.machineDirectory()).appendingPathComponent("alpine.img")
+        let snapshot = SessionTools.snapshot
+        imageError = nil
+        imageStatus = restore ? "Restoring disk snapshot…" : "Saving disk snapshot…"
+        Task {
+            do {
+                try await Task.detached(priority: .utility) {
+                    try SessionTools.copyDisk(from: restore ? snapshot : disk, to: restore ? disk : snapshot)
+                }.value
+                hasDiskSnapshot = true
+            } catch {
+                imageError = error.localizedDescription
+            }
+            imageStatus = nil
         }
     }
 
@@ -70,17 +102,18 @@ final class VMViewModel: ObservableObject {
         syncFromBridge()
     }
 
-    func downloadPhosh(address: String, apps: Set<PhoshApp>) {
-        guard installTask == nil, !hasMachine else { return }
+    func downloadPhosh(address: String, apps: Set<PhoshApp>, customPassword: String) {
+        guard installTask == nil, !hasMachine, PhoshInstaller.validCustomPassword(customPassword) else { return }
         imageError = nil
         imageStatus = "Preparing download…"
         installTask = Task {
             let password = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
             do {
-                try await PhoshInstaller.install(address: address, apps: apps, password: password) {
+                try await PhoshInstaller.install(address: address, apps: apps, password: password, customPassword: customPassword) {
                     imageStatus = $0
                 }
                 consolePassword = password
+                guestTools.prepare(password: password)
                 installTask = nil
                 imageStatus = nil
                 startOrRetry()

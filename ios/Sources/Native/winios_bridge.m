@@ -3,12 +3,15 @@
 
 #include "hvsparse.h"
 #include "fb_display.h"
+#include "virgl.h"
+#include "virtio_gpu.h"
+#import <AVFoundation/AVFoundation.h>
 #include "share.h"
 #include "winios_jit.h"
 #include "winvm.h"
 
 #import <UIKit/UIKit.h>
-#include <mach/mach_time.h>
+#include <math.h>
 #include <sys/sysctl.h>
 #include <os/lock.h>
 #include <sys/stat.h>
@@ -20,16 +23,12 @@ static WinIOSBridge *s_shared_bridge = nil;
     BOOL _unpacking;
     double _unpackProgress;
     NSString *_vmStatus;
-    dispatch_queue_t _diagQueue;
-    dispatch_source_t _diagTimer;
-    CFAbsoluteTime _bootStartTime;
+    dispatch_queue_t _maintenanceQueue;
+    dispatch_source_t _maintenanceTimer;
     uint64_t _configuredRamMB;
     int _configuredCPUs;
     CAMetalLayer *__weak _pendingLayer;
-    uint64_t _diagTickCount;
-    uint64_t _lastMachTicks;
-    uint64_t _lastWfiTicks;
-    double _lastWfiIdlePct;
+    uint64_t _maintenanceTickCount;
 
     os_unfair_lock _metricsLock;
     CGSize _screenSizePts;
@@ -37,8 +36,8 @@ static WinIOSBridge *s_shared_bridge = nil;
 }
 - (void)handleVMExitWithReason:(NSString *)reason;
 - (void)updateUnpackProgress:(double)frac;
-- (void)startDiagTimer;
-- (void)stopDiagTimer;
+- (void)startMaintenanceTimer;
+- (void)stopMaintenanceTimer;
 @end
 
 static void vm_exit_trampoline(int reason) {
@@ -93,7 +92,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         _screenScale = 3.0;
         hv_share_set_url_handler_enabled(0);
         dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
-        _diagQueue = dispatch_queue_create("alpineios.diagnostics", attr);
+        _maintenanceQueue = dispatch_queue_create("alpineios.maintenance", attr);
         NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
         [nc addObserver:self selector:@selector(onAppBackgroundOrTerminate:) name:UIApplicationDidEnterBackgroundNotification object:nil];
         [nc addObserver:self selector:@selector(onAppBackgroundOrTerminate:) name:UIApplicationWillTerminateNotification object:nil];
@@ -104,7 +103,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (void)onAppBackgroundOrTerminate:(NSNotification *)note {
     (void)note;
     if (_vmRunning) {
-        dispatch_async(_diagQueue, ^{
+        dispatch_async(_maintenanceQueue, ^{
             hv_winvm_flush_disks();
         });
     }
@@ -120,11 +119,64 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     }
 }
 
+static CGSize guestDisplaySizeAtScale(CGSize size, double *factor) {
+    *factor = fmin(*factor, 1536.0 / fmax(size.width, size.height));
+    return CGSizeMake(fmax(320, lround(size.width * *factor / 2) * 2),
+                      fmax(320, lround(size.height * *factor / 2) * 2));
+}
+
+static CGSize guestDisplaySize(CGSize size, double *guestScale) {
+    NSString *profile = [[NSUserDefaults standardUserDefaults] stringForKey:@"guestDisplayProfile"];
+    *guestScale = [profile isEqualToString:@"smooth"] ? 1.0 : [profile isEqualToString:@"sharp"] ? 1.5 : 1.25;
+    return guestDisplaySizeAtScale(size, guestScale);
+}
+
+- (void)writeGuestDisplay:(CGSize)size scale:(double)scale {
+    NSString *shared = [[self documentsPath] stringByAppendingPathComponent:@"Shared"];
+    // Phoc needs a scale of at least 1 even for very small Stage Manager windows.
+    [[NSString stringWithFormat:@"%.3f", fmax(1.0, scale)]
+        writeToFile:[shared stringByAppendingPathComponent:@".alpineios-display-scale"]
+         atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [[NSString stringWithFormat:@"%ux%u %.3f", (unsigned)size.width, (unsigned)size.height, fmax(1.0, scale)]
+        writeToFile:[shared stringByAppendingPathComponent:@".alpineios-display-mode"]
+         atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
 - (void)updateScreenSize:(CGSize)size scale:(CGFloat)scale {
     os_unfair_lock_lock(&_metricsLock);
     _screenSizePts = size;
     if (scale > 0.0) _screenScale = scale;
     os_unfair_lock_unlock(&_metricsLock);
+    if (_vmRunning && size.width > 0 && size.height > 0) {
+        double guestScale;
+        CGSize target = guestDisplaySize(size, &guestScale);
+        hv_virtio_gpu_request_size((unsigned)target.width, (unsigned)target.height);
+        [self writeGuestDisplay:target scale:guestScale];
+    }
+}
+
+- (void)refreshGuestDisplay {
+    os_unfair_lock_lock(&_metricsLock);
+    CGSize size = _screenSizePts;
+    CGFloat scale = _screenScale;
+    os_unfair_lock_unlock(&_metricsLock);
+    [self updateScreenSize:size scale:scale];
+}
+
+- (void)setGuestPaused:(BOOL)paused {
+    if (_vmRunning) hv_winvm_set_paused(paused);
+}
+
+- (void)publishClipboard:(NSString *)text {
+    hv_share_set_clipboard(text.UTF8String);
+}
+
+- (nullable NSString *)takeGuestClipboard {
+    char *text = hv_share_take_clipboard();
+    if (!text) return nil;
+    NSString *value = [NSString stringWithUTF8String:text];
+    free(text);
+    return value;
 }
 
 static NSString *hostModel(void) {
@@ -183,9 +235,6 @@ static NSString *hostChip(NSString *model) {
 
 - (BOOL)tryAcquireJIT:(BOOL)detachAfter {
     BOOL ok = winios_jit_acquire(WINIOS_JIT_DEFAULT_BYTES, detachAfter);
-    dispatch_async(_diagQueue, ^{
-        [self writeDiagnosticsSnapshot];
-    });
     [self notifyChanged];
     return ok;
 }
@@ -300,9 +349,6 @@ static NSString *hostChip(NSString *model) {
 - (void)updateUnpackProgress:(double)frac {
     _unpackProgress = frac;
     _vmStatus = [NSString stringWithFormat:@"Unpacking postmarketOS NVMe image (%.0f%%)...", frac * 100.0];
-    dispatch_async(_diagQueue, ^{
-        [self writeDiagnosticsSnapshot];
-    });
     [self notifyChanged];
 }
 
@@ -319,7 +365,6 @@ static NSString *hostChip(NSString *model) {
 
     if (![self hasProvisionedMachine]) {
         _vmStatus = @"Download Phosh or import an existing machine";
-        dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
         [self notifyChanged];
         return;
     }
@@ -329,7 +374,6 @@ static NSString *hostChip(NSString *model) {
         _unpacking = YES;
         _unpackProgress = 0.0;
         _vmStatus = @"Unpacking postmarketOS NVMe image (0%)...";
-        dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
         [self notifyChanged];
 
         NSString *src = [dir stringByAppendingPathComponent:@"alpine.hvsparse"];
@@ -354,7 +398,6 @@ static NSString *hostChip(NSString *model) {
                 } else {
                     unlink(tmpDst.fileSystemRepresentation);
                     self->_vmStatus = @"Error: failed to unpack alpine.hvsparse";
-                    dispatch_async(self->_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
                     [self notifyChanged];
                 }
             });
@@ -372,15 +415,20 @@ static NSString *hostChip(NSString *model) {
         [self tryAcquireJIT:YES];
         if (!self.isJITLive) {
             _vmStatus = @"Waiting for TXM JIT (attach StikDebug or launch_on_iphone.sh)";
-            dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
             [self notifyChanged];
             return;
         }
     }
 
-    setenv("HV_VIRTIO_DISPLAY", "400x864", 1);
     setenv("HV_NO_USB", "1", 1);
+    // Linux uses virtio-snd. Skip the legacy HDA controller.
     setenv("HV_NO_AUDIO", "1", 1);
+    AVAudioSession *audio = AVAudioSession.sharedInstance;
+    [audio setCategory:AVAudioSessionCategoryPlayback mode:AVAudioSessionModeDefault
+               options:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+    [audio setPreferredSampleRate:48000 error:nil];
+    [audio setPreferredIOBufferDuration:0.02 error:nil];
+    [audio setActive:YES error:nil];
     WinIosDualMapping jit = winios_jit_mapping();
     if (!jit.rx_addr || !jit.rw_addr) {
         _vmStatus = @"Error: JIT region missing";
@@ -394,7 +442,7 @@ static NSString *hostChip(NSString *model) {
     uint64_t preallocBytes = 0;
     void *preallocRam = winios_jit_guest_ram(&preallocBytes);
     // Alpine profile: keep the same allocation size before and after LLDB detaches.
-    uint64_t ramMB = 1536;
+    uint64_t ramMB = preallocRam ? preallocBytes >> 20 : winios_guest_ram_target_mb();
     if (preallocRam && preallocBytes < (ramMB << 20)) {
         _vmStatus = @"Error: preallocated RAM is smaller than the Alpine profile";
         [self notifyChanged];
@@ -403,6 +451,50 @@ static NSString *hostChip(NSString *model) {
 
     NSString *sharedDir = [[self documentsPath] stringByAppendingPathComponent:@"Shared"];
     [[NSFileManager defaultManager] createDirectoryAtPath:sharedDir withIntermediateDirectories:YES attributes:nil error:nil];
+    // Preserve the device aspect ratio and keep the guest close to UIKit's logical size.
+    // Limit the longest edge to keep the framebuffer affordable on larger iPads.
+    UIWindowScene *scene = nil;
+    for (UIScene *candidate in UIApplication.sharedApplication.connectedScenes) {
+        if ([candidate isKindOfClass:UIWindowScene.class] &&
+            candidate.activationState == UISceneActivationStateForegroundActive) {
+            scene = (UIWindowScene *)candidate;
+            break;
+        }
+    }
+    UIScreen *activeScreen = scene.screen ?: UIScreen.mainScreen;
+    CGSize screen = scene ? scene.coordinateSpace.bounds.size : activeScreen.bounds.size;
+    double scale;
+    CGSize target = guestDisplaySize(screen, &scale);
+    NSString *mode = [NSString stringWithFormat:@"%ux%u", (unsigned)target.width, (unsigned)target.height];
+    setenv("HV_VIRTIO_DISPLAY", mode.UTF8String, 1);
+    double smoothScale = 1.0, sharpScale = 1.5, automaticScale = 1.25;
+    CGSize smooth = guestDisplaySizeAtScale(screen, &smoothScale);
+    CGSize sharp = guestDisplaySizeAtScale(screen, &sharpScale);
+    CGSize automatic = guestDisplaySizeAtScale(screen, &automaticScale);
+    // Seed the compositor with the profile modes before it opens the DRM output.
+    BOOL hasOppositeOrientation = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad;
+    CGSize extra = hasOppositeOrientation ? CGSizeMake(automatic.height, automatic.width) : automatic;
+    // The two native Duo panels have these pixel dimensions. Seed its other
+    // panel so Phoc already knows the full-screen mode on a fold or unfold.
+    CGSize pixels = activeScreen.nativeBounds.size;
+    CGFloat shortEdge = fmin(pixels.width, pixels.height);
+    CGFloat longEdge = fmax(pixels.width, pixels.height);
+    if ((shortEdge == 1398 && longEdge == 2034) || (shortEdge == 1878 && longEdge == 2670)) {
+        BOOL inner = shortEdge == 1878;
+        BOOL landscape = screen.width > screen.height;
+        CGSize other = inner ? CGSizeMake(1398, 2034) : CGSizeMake(1878, 2670);
+        if (landscape) other = CGSizeMake(other.height, other.width);
+        CGFloat density = activeScreen.nativeScale;
+        double otherScale;
+        extra = guestDisplaySize(CGSizeMake(other.width / density, other.height / density), &otherScale);
+    }
+    NSString *alternates = [NSString stringWithFormat:@"%ux%u %ux%u %ux%u",
+        (unsigned)smooth.width, (unsigned)smooth.height, (unsigned)sharp.width, (unsigned)sharp.height,
+        (unsigned)extra.width, (unsigned)extra.height];
+    setenv("HV_VIRTIO_ALTERNATE_MODES", alternates.UTF8String, 1);
+
+    [self writeGuestDisplay:target scale:scale];
+
     /* Keep AF_UNIX sun_path well under Darwin's 104-byte limit (~82 bytes vs 106 bytes) */
     NSString *rawTmp = [NSTemporaryDirectory() stringByReplacingOccurrencesOfString:@"/private/var/" withString:@"/var/"];
     NSString *shareSock = [rawTmp stringByAppendingPathComponent:@"s"];
@@ -419,7 +511,7 @@ static NSString *hostChip(NSString *model) {
 
     NSString *model = hostModel();
     NSString *chip = hostChip(model);
-    unsigned displayHz = (unsigned)UIScreen.mainScreen.maximumFramesPerSecond;
+    unsigned displayHz = (unsigned)activeScreen.maximumFramesPerSecond;
     NSDictionary *identity = @{
         @"model": model ?: NSNull.null,
         @"chip": chip ?: NSNull.null,
@@ -449,7 +541,7 @@ static NSString *hostChip(NSString *model) {
         .jit_rw = jit.rw_addr,
         .prealloc_ram = preallocRam,
         .no_net = 0,
-        .enable_sound = 0,
+        .enable_sound = 1,
         .log = 0,
         .stats_interval = 0,
     };
@@ -457,10 +549,13 @@ static NSString *hostChip(NSString *model) {
     char err[256] = {0};
     if (hv_winvm_create(&cfg, err, sizeof err) != 0) {
         _vmStatus = [NSString stringWithFormat:@"VM create failed: %s", err];
-        dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
         [self notifyChanged];
         return;
     }
+
+    NSString *graphics = strstr(hv_virgl_status(), "VirGL /") ? @"virgl" : @"software";
+    [graphics writeToFile:[sharedDir stringByAppendingPathComponent:@".alpineios-graphics"]
+               atomically:YES encoding:NSUTF8StringEncoding error:nil];
 
     CAMetalLayer *layer = _pendingLayer;
     if (layer) {
@@ -468,24 +563,19 @@ static NSString *hostChip(NSString *model) {
     }
 
     _vmRunning = YES;
-    _bootStartTime = CFAbsoluteTimeGetCurrent();
-    _diagTickCount = 0;
-    _lastMachTicks = mach_absolute_time();
-    _lastWfiTicks = 0;
-    _lastWfiIdlePct = 0.0;
+    _maintenanceTickCount = 0;
     _vmStatus = [NSString stringWithFormat:@"Running postmarketOS ARM64 (%d vCPUs, %llu MB RAM)", _configuredCPUs, _configuredRamMB];
     [[UIApplication sharedApplication] setIdleTimerDisabled:YES];
 
     hv_winvm_start(1, vm_exit_trampoline);
 
-    [self startDiagTimer];
-    dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
+    [self startMaintenanceTimer];
     [self notifyChanged];
 }
 
-- (void)startDiagTimer {
-    [self stopDiagTimer];
-    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _diagQueue);
+- (void)startMaintenanceTimer {
+    [self stopMaintenanceTimer];
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _maintenanceQueue);
     dispatch_source_set_timer(timer,
                               dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
                               8ull * NSEC_PER_SEC,
@@ -494,117 +584,33 @@ static NSString *hostChip(NSString *model) {
     dispatch_source_set_event_handler(timer, ^{
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
-        [strongSelf onDiagTickBackground];
+        [strongSelf onMaintenanceTick];
     });
-    _diagTimer = timer;
+    _maintenanceTimer = timer;
     dispatch_resume(timer);
 }
 
-- (void)stopDiagTimer {
-    if (_diagTimer) {
-        dispatch_source_cancel(_diagTimer);
-        _diagTimer = nil;
+- (void)stopMaintenanceTimer {
+    if (_maintenanceTimer) {
+        dispatch_source_cancel(_maintenanceTimer);
+        _maintenanceTimer = nil;
     }
 }
 
-- (void)onDiagTickBackground {
-    _diagTickCount++;
+- (void)onMaintenanceTick {
+    _maintenanceTickCount++;
     dispatch_async(dispatch_get_main_queue(), ^{ [self publishHostBattery:nil]; });
-    [self writeDiagnosticsSnapshot];
-    if (_vmRunning && (_diagTickCount % 4u) == 0u) {
+    if (_vmRunning && (_maintenanceTickCount % 4u) == 0u) {
         hv_winvm_flush_disks();
     }
     [self notifyChanged];
 }
 
-- (void)writeDiagnosticsSnapshot {
-    NSString *docs = [self documentsPath];
-    NSString *statusFile = [docs stringByAppendingPathComponent:@"boot_status.txt"];
-    BOOL running = _vmRunning;
-    double uptime = running ? (CFAbsoluteTimeGetCurrent() - _bootStartTime) : 0.0;
-    uint32_t w = [self framebufferWidth], h = [self framebufferHeight];
-    uint64_t frames = [self presentedFrames];
-
-    int kbdReady = 0, tabReady = 0;
-    uint64_t usbDelivered = 0;
-    uint64_t jitUsedBytes = 0, jitCapBytes = 0, jitFullFlushes = 0, wfiTicks = 0;
-    double wfiIdlePct = _lastWfiIdlePct;
-    if (running) {
-        hv_winvm_usb_stats(&kbdReady, &tabReady, &usbDelivered);
-        hv_winvm_engine_stats(&jitUsedBytes, &jitCapBytes, &jitFullFlushes, &wfiTicks);
-        uint64_t nowMach = mach_absolute_time();
-        if (_lastMachTicks > 0 && nowMach > _lastMachTicks && wfiTicks >= _lastWfiTicks && _configuredCPUs > 0) {
-            double pct = 100.0 * (double)(wfiTicks - _lastWfiTicks) /
-                         ((double)(nowMach - _lastMachTicks) * (double)_configuredCPUs);
-            if (pct < 0.0) pct = 0.0;
-            if (pct > 100.0) pct = 100.0;
-            wfiIdlePct = pct;
-            _lastWfiIdlePct = pct;
-        }
-        _lastMachTicks = nowMach;
-        _lastWfiTicks = wfiTicks;
-    }
-
-    os_unfair_lock_lock(&_metricsLock);
-    CGSize pt = _screenSizePts;
-    CGFloat scale = _screenScale;
-    os_unfair_lock_unlock(&_metricsLock);
-
-    unsigned battery = hv_share_battery_snapshot();
-    NSString *txt = [NSString stringWithFormat:
-        @"vm_running: %@\n"
-        @"vm_status: %@\n"
-        @"jit_live: %@\n"
-        @"jit_status: %@\n"
-        @"uptime_sec: %.1f\n"
-        @"cpus: %d\n"
-        @"ram_mb: %llu\n"
-        @"avail_mem_mb: %llu\n"
-        @"jit_used_mb: %.1f\n"
-        @"jit_cap_mb: %.0f\n"
-        @"jit_full_flushes: %llu\n"
-        @"wfi_idle_pct: %.1f\n"
-        @"fb_size: %ux%u\n"
-        @"frames_presented: %llu\n"
-        @"usb_kbd_ready: %d\n"
-        @"usb_tab_ready: %d\n"
-        @"usb_delivered: %llu\n"
-        @"share_up: %d\n"
-        @"host_model: %@\n"
-        @"host_battery_percent: %d\n"
-        @"display_link_hz: %.1f\n"
-        @"screen_pts: %.0fx%.0f @%.0fx\n",
-        running ? @"true" : @"false",
-        _vmStatus ?: @"",
-        self.isJITLive ? @"true" : @"false",
-        self.jitStatusText ?: @"",
-        uptime,
-        _configuredCPUs,
-        _configuredRamMB,
-        [self availableMemoryMB],
-        (double)jitUsedBytes / (1024.0 * 1024.0),
-        (double)jitCapBytes / (1024.0 * 1024.0),
-        jitFullFlushes,
-        wfiIdlePct,
-        w, h,
-        frames,
-        kbdReady,
-        tabReady,
-        usbDelivered,
-        running ? hv_winvm_share_up() : 0,
-        hostModel() ?: @"unknown",
-        (int)(battery >> 8) - 1,
-        hv_fb_metal_refresh_millihz() / 1000.0,
-        pt.width, pt.height, scale];
-    [txt writeToFile:statusFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
-}
-
 - (void)handleVMExitWithReason:(NSString *)reason {
     _vmRunning = NO;
-    [self stopDiagTimer];
+    [self stopMaintenanceTimer];
     [[UIApplication sharedApplication] setIdleTimerDisabled:NO];
     _vmStatus = [NSString stringWithFormat:@"Stopped (%@)", reason];
-    dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
     [self notifyChanged];
 }
 
