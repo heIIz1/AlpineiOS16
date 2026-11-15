@@ -140,9 +140,16 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
             return;
         }
 
-        uint64_t hval = quick_frame_hash(px, w, h, stride);
+        pthread_mutex_lock(&fb->mu);
+        if (fb->fb_host != px || fb->width != w || fb->height != h || fb->stride != stride) {
+            pthread_mutex_unlock(&fb->mu);
+            os_unfair_lock_unlock(&lock);
+            return;
+        }
+        uint64_t hval = fb->frame_generation ? fb->frame_generation : quick_frame_hash(px, w, h, stride);
         BOOL sizeChanged = !CGSizeEqualToSize(dsize, lastDrawableSize);
         if (hval == lastHash && !sizeChanged && texW == w && texH == h) {
+            pthread_mutex_unlock(&fb->mu);
             os_unfair_lock_unlock(&lock);
             return;
         }
@@ -162,6 +169,7 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
                    mipmapLevel:0
                      withBytes:px
                    bytesPerRow:stride];
+        pthread_mutex_unlock(&fb->mu);
 
         id<CAMetalDrawable> drawable = [curLayer nextDrawable];
         if (!drawable) {
@@ -237,7 +245,14 @@ int hv_fb_save_png(HvFbDisplay *fb, const char *path) {
         size_t total = (size_t)stride * h;
         uint8_t *copy = malloc(total);
         if (!copy) return -1;
-        memcpy(copy, px, total);
+        pthread_mutex_lock(&fb->mu);
+        BOOL current = fb->fb_host == px && fb->width == w && fb->height == h && fb->stride == stride;
+        if (current) memcpy(copy, px, total);
+        pthread_mutex_unlock(&fb->mu);
+        if (!current) {
+            free(copy);
+            return -1;
+        }
         /* Ensure alpha byte is 0xff (XRGB8888 leaves X=0x00) */
         for (uint32_t y = 0; y < h; y++) {
             uint8_t *row = copy + (size_t)y * stride;

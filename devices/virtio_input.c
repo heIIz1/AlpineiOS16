@@ -14,6 +14,7 @@
 #define CFG_ID_DEVIDS 0x03
 #define CFG_PROP_BITS 0x10
 #define CFG_EV_BITS 0x11
+#define CFG_ABS_INFO 0x12
 
 static void set_bit(uint8_t *bits, unsigned n) {
     bits[n / 8] |= (uint8_t)(1u << (n % 8));
@@ -27,9 +28,10 @@ static void answer(HvVirtioInput *d) {
     memset(c + 2, 0, 6 + 128);
     uint32_t size = 0;
     int kbd = d->kind == HV_VINPUT_KEYBOARD;
+    int touch = d->kind == HV_VINPUT_TOUCHSCREEN;
     switch (select) {
     case CFG_ID_NAME: {
-        const char *name = kbd ? "HengeVM Keyboard" : "HengeVM Mouse";
+        const char *name = kbd ? "HengeVM Keyboard" : touch ? "VM Touchscreen" : "HengeVM Mouse";
         size = (uint32_t)strlen(name);
         memcpy(data, name, size);
         break;
@@ -48,21 +50,38 @@ static void answer(HvVirtioInput *d) {
         break;
     }
     case CFG_PROP_BITS:
-        if (!kbd) {
+        if (touch) {
+            set_bit(data, 1); /* INPUT_PROP_DIRECT */
+            size = 1;
+        } else if (!kbd) {
             data[0] = 1; /* INPUT_PROP_POINTER */
             size = 1;
+        }
+        break;
+    case CFG_ABS_INFO:
+        if (touch && (subsel == HV_ABS_X || subsel == HV_ABS_Y)) {
+            uint32_t info[5] = {0, 32767, 0, 0, 0};
+            memcpy(data, info, sizeof info);
+            size = sizeof info;
         }
         break;
     case CFG_EV_BITS:
         if (kbd && subsel == HV_EV_KEY) {
             for (unsigned k = 1; k < 0x100; k++) set_bit(data, k); /* every key, no buttons */
             size = 0x100 / 8;
-        } else if (!kbd && subsel == HV_EV_KEY) {
+        } else if (touch && subsel == HV_EV_KEY) {
+            set_bit(data, HV_BTN_TOUCH);
+            size = HV_BTN_TOUCH / 8 + 1;
+        } else if (touch && subsel == HV_EV_ABS) {
+            set_bit(data, HV_ABS_X);
+            set_bit(data, HV_ABS_Y);
+            size = 1;
+        } else if (!kbd && !touch && subsel == HV_EV_KEY) {
             set_bit(data, HV_BTN_LEFT);
             set_bit(data, HV_BTN_RIGHT);
             set_bit(data, HV_BTN_MIDDLE);
             size = HV_BTN_MIDDLE / 8 + 1;
-        } else if (!kbd && subsel == HV_EV_REL) {
+        } else if (!kbd && !touch && subsel == HV_EV_REL) {
             set_bit(data, HV_REL_X);
             set_bit(data, HV_REL_Y);
             set_bit(data, HV_REL_HWHEEL);

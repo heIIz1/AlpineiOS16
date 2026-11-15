@@ -159,6 +159,16 @@ static void *cmd_file_thread(void *arg) {
             hv_winvm_send_ctrl_alt_del();
         } else if (!strcmp(line, "power")) {
             hv_winvm_power_button();
+        } else if (!strncmp(line, "serial ", 7)) {
+            const uint8_t *bytes = (const uint8_t *)(line + 7);
+            size_t len = strlen(line + 7);
+            size_t off = 0;
+            while (off < len && !g_sig_stop) {
+                off += hv_winvm_serial_write(bytes + off, len - off);
+                if (off < len) usleep(10000);
+            }
+            const uint8_t cr = '\r';
+            hv_winvm_serial_write(&cr, 1);
         } else if (!strncmp(line, "type ", 5)) {
             for (const char *p = line + 5; *p; p++) type_ascii_char(*p);
         } else if (!strncmp(line, "screenshot ", 11)) {
@@ -207,7 +217,8 @@ static void *cmd_file_thread(void *arg) {
             hv_winvm_stop();
             break;
         }
-        fprintf(stderr, "winvm: cmd: %s\n", line);
+        /* Input may contain console passwords. Log only the command kind. */
+        fprintf(stderr, "winvm: cmd: %.*s\n", (int)strcspn(line, " "), line);
     }
     fclose(f);
     return NULL;
@@ -485,6 +496,7 @@ static void usage(const char *prog) {
             "  --disk1 <img|dmg>         Secondary/installer NVMe image (read-only)\n"
             "  --cpus <N>                Number of vCPUs (default: 4)\n"
             "  --ram <MB>                Guest RAM in MB (default: 4096)\n"
+            "  --jit <MB>                JIT cache size in MB (default: 768)\n"
             "  --share <dir>             Host folder shared at http://10.0.2.4/\n"
             "  --headless                Run without Cocoa GUI window\n"
             "  --screenshot <png>        Save guest framebuffer PNG\n"
@@ -523,6 +535,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--disk1"))        cfg.disk1 = argv[++i];
         else if (!strcmp(argv[i], "--cpus"))         cfg.ncpus = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ram"))          cfg.ram_mb = strtoull(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--jit"))          cfg.jit_bytes = (size_t)strtoull(argv[++i], NULL, 0) << 20;
         else if (!strcmp(argv[i], "--share"))        cfg.share_dir = argv[++i];
         else if (!strcmp(argv[i], "--screenshot"))   targs.screenshot_path = argv[++i];
         else if (!strcmp(argv[i], "--screenshot-after")) targs.screenshot_after = atoi(argv[++i]);

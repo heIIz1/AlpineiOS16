@@ -25,11 +25,7 @@ typedef void (^WinIOSStateCallback)(void);
 @property (nonatomic, readonly) BOOL usbKeyboardReady;
 @property (nonatomic, readonly) BOOL usbTabletReady;
 @property (nonatomic, readonly) uint64_t usbEventsDelivered;
-@property (nonatomic, assign) BOOL useSafariForGuestLinks;
 @property (nonatomic, copy, nullable) WinIOSStateCallback onStateChanged;
-
-- (nullable NSString *)takeGuestOpenURL;
-- (BOOL)takeGuestOAuthDone;
 
 - (void)installTrapGuard;
 - (BOOL)tryAcquireJIT:(BOOL)detachAfter;
@@ -40,7 +36,6 @@ typedef void (^WinIOSStateCallback)(void);
 - (void)bindMetalLayer:(nullable CAMetalLayer *)layer;
 
 - (void)updateScreenSize:(CGSize)size scale:(CGFloat)scale;
-- (void)updateHingeStatus:(NSInteger)status angleDegrees:(double)angleDegrees;
 
 - (void)sendTabletNormalizedX:(double)x y:(double)y buttons:(uint8_t)buttons wheel:(int8_t)wheel;
 - (void)sendKeyHid:(uint8_t)usage down:(BOOL)down;
@@ -53,6 +48,8 @@ typedef void (^WinIOSStateCallback)(void);
 - (void)pressPowerButton;
 - (void)flushDisks;
 - (void)stopVM;
+- (NSData *)readSerial;
+- (NSUInteger)sendSerial:(NSData *)data;
 
 @end
 

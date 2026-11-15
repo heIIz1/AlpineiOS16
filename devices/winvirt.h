@@ -20,6 +20,7 @@
 #include "pl061.h"
 #include "hda.h"
 #include "virtio_net.h"
+#include "virtio_input.h"
 #include "virtio_snd.h"
 #include "xhci.h"
 
@@ -74,6 +75,7 @@ typedef struct HvWinVirt {
     HvFbDisplay *fb;
     HvPcie *pcie;
     HvVirtioNet *net;
+    HvVirtioInput *keyboard, *touchscreen;
     HvNvme *nvme0;
     HvNvme *nvme1;
     HvXhci *usb;

@@ -6,7 +6,6 @@
 #include "winios_jit.h"
 #include "winvm.h"
 
-#import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 #include <mach/mach_time.h>
 #include <os/lock.h>
@@ -33,8 +32,6 @@ static WinIOSBridge *s_shared_bridge = nil;
     os_unfair_lock _metricsLock;
     CGSize _screenSizePts;
     CGFloat _screenScale;
-    NSInteger _hingeStatus;
-    double _hingeAngleDegrees;
 }
 - (void)handleVMExitWithReason:(NSString *)reason;
 - (void)updateUnpackProgress:(double)frac;
@@ -68,6 +65,16 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 @implementation WinIOSBridge
 
+- (NSData *)readSerial {
+    uint8_t bytes[16384];
+    size_t n = hv_winvm_serial_read(bytes, sizeof bytes);
+    return [NSData dataWithBytes:bytes length:n];
+}
+
+- (NSUInteger)sendSerial:(NSData *)data {
+    return hv_winvm_serial_write(data.bytes, data.length);
+}
+
 + (WinIOSBridge *)shared {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -82,54 +89,14 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         _metricsLock = OS_UNFAIR_LOCK_INIT;
         _screenSizePts = CGSizeZero;
         _screenScale = 3.0;
-        _hingeStatus = 0;
-        _hingeAngleDegrees = -1.0;
-        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        BOOL safariDefault = ([ud objectForKey:@"winios.safariOAuthV2"] == nil) ? YES : [ud boolForKey:@"winios.safariOAuthV2"];
-        hv_share_set_url_handler_enabled(safariDefault ? 1 : 0);
+        hv_share_set_url_handler_enabled(0);
         dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
-        _diagQueue = dispatch_queue_create("me.ammaar.windowsios.diag", attr);
+        _diagQueue = dispatch_queue_create("alpineios.diagnostics", attr);
         NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
         [nc addObserver:self selector:@selector(onAppBackgroundOrTerminate:) name:UIApplicationDidEnterBackgroundNotification object:nil];
         [nc addObserver:self selector:@selector(onAppBackgroundOrTerminate:) name:UIApplicationWillTerminateNotification object:nil];
-        [nc addObserver:self selector:@selector(onAudioInterruption:) name:AVAudioSessionInterruptionNotification object:nil];
     }
     return self;
-}
-
-- (void)configureAudioSessionAndMicPermission {
-    AVAudioSession *session = [AVAudioSession sharedInstance];
-    AVAudioSessionCategoryOptions opts = AVAudioSessionCategoryOptionDefaultToSpeaker |
-                                         AVAudioSessionCategoryOptionAllowBluetooth |
-                                         AVAudioSessionCategoryOptionAllowBluetoothA2DP |
-                                         AVAudioSessionCategoryOptionMixWithOthers;
-    NSError *err = nil;
-    if (![session setCategory:AVAudioSessionCategoryPlayAndRecord mode:AVAudioSessionModeDefault options:opts error:&err]) {
-        /* Fallback to Playback if PlayAndRecord temporarily rejected before permission */
-        [session setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
-    }
-    [session setPreferredSampleRate:48000.0 error:nil];
-    [session setPreferredIOBufferDuration:0.010 error:nil];
-    [session setActive:YES error:nil];
-
-    if (@available(iOS 17.0, *)) {
-        [AVAudioApplication requestRecordPermissionWithCompletionHandler:^(BOOL granted) {
-            if (granted) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    AVAudioSession *s = [AVAudioSession sharedInstance];
-                    [s setCategory:AVAudioSessionCategoryPlayAndRecord mode:AVAudioSessionModeDefault options:opts error:nil];
-                    [s setActive:YES error:nil];
-                });
-            }
-        }];
-    }
-}
-
-- (void)onAudioInterruption:(NSNotification *)note {
-    NSNumber *typeNum = note.userInfo[AVAudioSessionInterruptionTypeKey];
-    if (typeNum && typeNum.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded) {
-        [[AVAudioSession sharedInstance] setActive:YES error:nil];
-    }
 }
 
 - (void)onAppBackgroundOrTerminate:(NSNotification *)note {
@@ -158,17 +125,29 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     os_unfair_lock_unlock(&_metricsLock);
 }
 
-- (void)updateHingeStatus:(NSInteger)status angleDegrees:(double)angleDegrees {
-    os_unfair_lock_lock(&_metricsLock);
-    _hingeStatus = status;
-    _hingeAngleDegrees = angleDegrees;
-    os_unfair_lock_unlock(&_metricsLock);
+- (void)publishHostBattery:(NSNotification *)notification {
+    (void)notification;
+    UIDevice *device = UIDevice.currentDevice;
+    float level = device.batteryLevel;
+    HvBatteryState state = HV_BATTERY_UNKNOWN;
+    switch (device.batteryState) {
+        case UIDeviceBatteryStateUnplugged: state = HV_BATTERY_UNPLUGGED; break;
+        case UIDeviceBatteryStateCharging: state = HV_BATTERY_CHARGING; break;
+        case UIDeviceBatteryStateFull: state = HV_BATTERY_FULL; break;
+        case UIDeviceBatteryStateUnknown: break;
+    }
+    hv_share_set_battery(level < 0 ? -1 : (int)(level * 100 + 0.5f), state);
 }
 
 - (void)installTrapGuard {
     winios_jit_install_trap_handler();
+    UIDevice.currentDevice.batteryMonitoringEnabled = YES;
+    NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+    [center addObserver:self selector:@selector(publishHostBattery:) name:UIDeviceBatteryLevelDidChangeNotification object:nil];
+    [center addObserver:self selector:@selector(publishHostBattery:) name:UIDeviceBatteryStateDidChangeNotification object:nil];
+    [center addObserver:self selector:@selector(publishHostBattery:) name:UIApplicationDidBecomeActiveNotification object:nil];
+    [self publishHostBattery:nil];
     [[UIApplication sharedApplication] setIdleTimerDisabled:YES];
-    [self configureAudioSessionAndMicPermission];
     UIScreen *mainScreen = [UIScreen mainScreen];
     [self updateScreenSize:mainScreen.bounds.size scale:mainScreen.scale];
     [self notifyChanged];
@@ -258,28 +237,28 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (NSString *)machineDirectory {
     NSString *docs = [self documentsPath];
-    NSString *win11Dir = [docs stringByAppendingPathComponent:@"Machines/Win11"];
+    NSString *alpineDir = [docs stringByAppendingPathComponent:@"Machines/PostmarketOS-Native"];
     NSFileManager *fm = [NSFileManager defaultManager];
-    if ([fm fileExistsAtPath:[win11Dir stringByAppendingPathComponent:@"code.fd"]]) {
-        return win11Dir;
+    if ([fm fileExistsAtPath:[alpineDir stringByAppendingPathComponent:@"code.fd"]]) {
+        return alpineDir;
     }
     if ([fm fileExistsAtPath:[docs stringByAppendingPathComponent:@"code.fd"]]) {
         return docs;
     }
-    [fm createDirectoryAtPath:win11Dir withIntermediateDirectories:YES attributes:nil error:nil];
-    return win11Dir;
+    [fm createDirectoryAtPath:alpineDir withIntermediateDirectories:YES attributes:nil error:nil];
+    return alpineDir;
 }
 
 - (BOOL)hasRawDiskImageAt:(NSString *)dir {
-    NSString *raw = [dir stringByAppendingPathComponent:@"windows11.img"];
+    NSString *raw = [dir stringByAppendingPathComponent:@"alpine.img"];
     NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:raw error:nil];
     return attrs && [attrs fileSize] >= (64ull << 20);
 }
 
 - (BOOL)needsSparseUnpack {
     NSString *dir = [self machineDirectory];
-    NSString *sparse = [dir stringByAppendingPathComponent:@"windows11.hvsparse"];
-    return [[NSFileManager defaultManager] fileExistsAtPath:sparse];
+    NSString *sparse = [dir stringByAppendingPathComponent:@"alpine.hvsparse"];
+    return ![self hasRawDiskImageAt:dir] && [[NSFileManager defaultManager] fileExistsAtPath:sparse];
 }
 
 - (BOOL)hasProvisionedMachine {
@@ -292,7 +271,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (void)updateUnpackProgress:(double)frac {
     _unpackProgress = frac;
-    _vmStatus = [NSString stringWithFormat:@"Unpacking Windows 11 NVMe image (%.0f%%)...", frac * 100.0];
+    _vmStatus = [NSString stringWithFormat:@"Unpacking postmarketOS NVMe image (%.0f%%)...", frac * 100.0];
     dispatch_async(_diagQueue, ^{
         [self writeDiagnosticsSnapshot];
     });
@@ -310,18 +289,8 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     if (layer) _pendingLayer = layer;
     if (_vmRunning || _unpacking) return;
 
-    if (!self.isJITLive) {
-        [self tryAcquireJIT:YES];
-        if (!self.isJITLive) {
-            _vmStatus = @"Waiting for TXM JIT (attach StikDebug or launch_on_duo.sh)";
-            dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
-            [self notifyChanged];
-            return;
-        }
-    }
-
     if (![self hasProvisionedMachine]) {
-        _vmStatus = @"Place code.fd, vars.fd, and windows11.hvsparse in Documents/Machines/Win11";
+        _vmStatus = @"Download Phosh or import an existing machine";
         dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
         [self notifyChanged];
         return;
@@ -331,30 +300,32 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     if ([self needsSparseUnpack]) {
         _unpacking = YES;
         _unpackProgress = 0.0;
-        _vmStatus = @"Unpacking Windows 11 NVMe image (0%)...";
+        _vmStatus = @"Unpacking postmarketOS NVMe image (0%)...";
         dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
         [self notifyChanged];
 
-        NSString *src = [dir stringByAppendingPathComponent:@"windows11.hvsparse"];
-        NSString *dst = [dir stringByAppendingPathComponent:@"windows11.img"];
-        NSString *tmpDst = [dir stringByAppendingPathComponent:@"windows11.img.unpacking"];
+        NSString *src = [dir stringByAppendingPathComponent:@"alpine.hvsparse"];
+        NSString *dst = [dir stringByAppendingPathComponent:@"alpine.img"];
+        NSString *tmpDst = [dir stringByAppendingPathComponent:@"alpine.img.unpacking"];
 
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             unlink(tmpDst.fileSystemRepresentation);
-            unlink(dst.fileSystemRepresentation);
             UnpackCtx ctx = {.bridge = self, .lastUpdate = 0};
             int rc = hv_sparse_unpack(src.fileSystemRepresentation, tmpDst.fileSystemRepresentation, unpack_progress_cb, &ctx);
             dispatch_async(dispatch_get_main_queue(), ^{
                 self->_unpacking = NO;
                 if (rc == 0) {
-                    unlink(dst.fileSystemRepresentation);
-                    rename(tmpDst.fileSystemRepresentation, dst.fileSystemRepresentation);
+                    if (rename(tmpDst.fileSystemRepresentation, dst.fileSystemRepresentation) != 0) {
+                        self->_vmStatus = @"Error: cannot install unpacked Alpine disk";
+                        [self notifyChanged];
+                        return;
+                    }
                     unlink(src.fileSystemRepresentation);
                     self->_unpackProgress = 1.0;
                     [self startConfiguredVMInDirectory:dir];
                 } else {
                     unlink(tmpDst.fileSystemRepresentation);
-                    self->_vmStatus = @"Error: failed to unpack windows11.hvsparse";
+                    self->_vmStatus = @"Error: failed to unpack alpine.hvsparse";
                     dispatch_async(self->_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
                     [self notifyChanged];
                 }
@@ -368,8 +339,20 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (void)startConfiguredVMInDirectory:(NSString *)dir {
     if (_vmRunning) return;
-    [self configureAudioSessionAndMicPermission];
 
+    if (!self.isJITLive) {
+        [self tryAcquireJIT:YES];
+        if (!self.isJITLive) {
+            _vmStatus = @"Waiting for TXM JIT (attach StikDebug or launch_on_iphone.sh)";
+            dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
+            [self notifyChanged];
+            return;
+        }
+    }
+
+    setenv("HV_VIRTIO_DISPLAY", "400x864", 1);
+    setenv("HV_NO_USB", "1", 1);
+    setenv("HV_NO_AUDIO", "1", 1);
     WinIosDualMapping jit = winios_jit_mapping();
     if (!jit.rx_addr || !jit.rw_addr) {
         _vmStatus = @"Error: JIT region missing";
@@ -377,20 +360,17 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         return;
     }
 
-    NSString *ramBacking = [NSTemporaryDirectory() stringByAppendingPathComponent:@"win11_guest_ram.bin"];
+    NSString *ramBacking = [NSTemporaryDirectory() stringByAppendingPathComponent:@"alpine_guest_ram.bin"];
     setenv("HV_RAM_FILE", ramBacking.fileSystemRepresentation, 1);
 
     uint64_t preallocBytes = 0;
     void *preallocRam = winios_jit_guest_ram(&preallocBytes);
-    uint64_t ramMB = 3072;
-    if (preallocRam && preallocBytes >= (1024ull << 20)) {
-        ramMB = preallocBytes >> 20;
-    } else {
-        uint64_t availMB = [self availableMemoryMB];
-        if (availMB >= 5000) ramMB = 4096;
-        else if (availMB >= 4200) ramMB = 3584;
-        else if (availMB < 3400 && availMB > 1800) ramMB = (availMB - 768) & ~127ull;
-        else if (availMB <= 1800) ramMB = 2048;
+    // Alpine profile: keep the same allocation size before and after LLDB detaches.
+    uint64_t ramMB = 1536;
+    if (preallocRam && preallocBytes < (ramMB << 20)) {
+        _vmStatus = @"Error: preallocated RAM is smaller than the Alpine profile";
+        [self notifyChanged];
+        return;
     }
 
     NSString *sharedDir = [[self documentsPath] stringByAppendingPathComponent:@"Shared"];
@@ -402,16 +382,18 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
     NSString *codePath = [dir stringByAppendingPathComponent:@"code.fd"];
     NSString *varsPath = [dir stringByAppendingPathComponent:@"vars.fd"];
-    NSString *diskPath = [dir stringByAppendingPathComponent:@"windows11.img"];
+    NSString *diskPath = [dir stringByAppendingPathComponent:@"alpine.img"];
+    NSString *seedPath = [dir stringByAppendingPathComponent:@"seed.img"];
+    BOOL hasSeed = [[NSFileManager defaultManager] fileExistsAtPath:seedPath];
 
     _configuredRamMB = ramMB;
-    _configuredCPUs = 4;
+    _configuredCPUs = 1;
 
     HvWinVmConfig cfg = {
         .code_fd = codePath.fileSystemRepresentation,
         .vars_fd = varsPath.fileSystemRepresentation,
         .disk0 = diskPath.fileSystemRepresentation,
-        .disk1 = NULL,
+        .disk1 = hasSeed ? seedPath.fileSystemRepresentation : NULL,
         .share_dir = sharedDir.fileSystemRepresentation,
         .share_sock = shareSock.fileSystemRepresentation,
         .ncpus = _configuredCPUs,
@@ -421,7 +403,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         .jit_rw = jit.rw_addr,
         .prealloc_ram = preallocRam,
         .no_net = 0,
-        .enable_sound = 1,
+        .enable_sound = 0,
         .log = 0,
         .stats_interval = 0,
     };
@@ -445,7 +427,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     _lastMachTicks = mach_absolute_time();
     _lastWfiTicks = 0;
     _lastWfiIdlePct = 0.0;
-    _vmStatus = [NSString stringWithFormat:@"Running Windows 11 ARM64 (%d vCPUs, %llu MB RAM)", _configuredCPUs, _configuredRamMB];
+    _vmStatus = [NSString stringWithFormat:@"Running postmarketOS ARM64 (%d vCPUs, %llu MB RAM)", _configuredCPUs, _configuredRamMB];
     [[UIApplication sharedApplication] setIdleTimerDisabled:YES];
 
     hv_winvm_start(1, vm_exit_trampoline);
@@ -482,19 +464,8 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (void)onDiagTickBackground {
     _diagTickCount++;
     [self writeDiagnosticsSnapshot];
-    if (_vmRunning) {
-        if ((_diagTickCount % 4u) == 0u) {
-            hv_winvm_flush_disks();
-        }
-        double uptime = CFAbsoluteTimeGetCurrent() - _bootStartTime;
-        if (uptime <= 240.0 || getenv("WINIOS_ALWAYS_SCREENSHOT") != NULL) {
-            NSString *docs = [self documentsPath];
-            NSString *tmpPng = [docs stringByAppendingPathComponent:@"latest_screen.png.tmp"];
-            NSString *dstPng = [docs stringByAppendingPathComponent:@"latest_screen.png"];
-            if (hv_winvm_save_png(tmpPng.fileSystemRepresentation) == 0) {
-                rename(tmpPng.fileSystemRepresentation, dstPng.fileSystemRepresentation);
-            }
-        }
+    if (_vmRunning && (_diagTickCount % 4u) == 0u) {
+        hv_winvm_flush_disks();
     }
     [self notifyChanged];
 }
@@ -530,8 +501,6 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     os_unfair_lock_lock(&_metricsLock);
     CGSize pt = _screenSizePts;
     CGFloat scale = _screenScale;
-    NSInteger hingeStatus = _hingeStatus;
-    double hingeDeg = _hingeAngleDegrees;
     os_unfair_lock_unlock(&_metricsLock);
 
     NSString *txt = [NSString stringWithFormat:
@@ -553,9 +522,6 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         @"usb_tab_ready: %d\n"
         @"usb_delivered: %llu\n"
         @"share_up: %d\n"
-        @"oauth_safari: %d\n"
-        @"hinge_status: %ld\n"
-        @"hinge_angle_deg: %.1f\n"
         @"screen_pts: %.0fx%.0f @%.0fx\n",
         running ? @"true" : @"false",
         _vmStatus ?: @"",
@@ -575,9 +541,6 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         tabReady,
         usbDelivered,
         running ? hv_winvm_share_up() : 0,
-        hv_share_url_handler_enabled(),
-        (long)hingeStatus,
-        hingeDeg,
         pt.width, pt.height, scale];
     [txt writeToFile:statusFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
@@ -657,27 +620,6 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (void)stopVM {
     if (!_vmRunning) return;
     hv_winvm_stop();
-}
-
-- (BOOL)useSafariForGuestLinks {
-    return hv_share_url_handler_enabled() != 0;
-}
-
-- (void)setUseSafariForGuestLinks:(BOOL)useSafariForGuestLinks {
-    hv_share_set_url_handler_enabled(useSafariForGuestLinks ? 1 : 0);
-    [[NSUserDefaults standardUserDefaults] setBool:useSafariForGuestLinks forKey:@"winios.safariOAuthV2"];
-}
-
-- (nullable NSString *)takeGuestOpenURL {
-    char *raw = hv_share_take_open_url();
-    if (!raw) return nil;
-    NSString *s = [NSString stringWithUTF8String:raw];
-    free(raw);
-    return s;
-}
-
-- (BOOL)takeGuestOAuthDone {
-    return hv_share_take_oauth_done() != 0;
 }
 
 @end

@@ -20,7 +20,7 @@ typedef struct WinIosDualMapping {
     size_t   size;
 } WinIosDualMapping;
 
-#define WINIOS_JIT_DEFAULT_BYTES ((size_t)384u << 20) /* 384 MiB */
+#define WINIOS_JIT_DEFAULT_BYTES ((size_t)128u << 20) /* 128 MiB for the Alpine profile */
 
 void winios_jit_install_trap_handler(void);
 bool winios_jit_is_debugger_attached(void);

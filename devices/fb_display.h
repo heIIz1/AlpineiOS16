@@ -23,6 +23,7 @@ typedef struct HvFbDisplay {
     uint32_t height;
     uint32_t stride;
     uint32_t fourcc; /* DRM fourcc, e.g. XR24 / AR24 (32-bit BGRX) */
+    uint64_t frame_generation; /* nonzero for event-driven VirtIO scanout */
     int active;
 
     /* Metal presenter handle (created lazily by fb_metal.m) */

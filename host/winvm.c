@@ -52,7 +52,48 @@ const char *hv_winvm_reason_name(int r) {
     }
 }
 
+static os_unfair_lock serial_lock = OS_UNFAIR_LOCK_INIT;
+static uint8_t serial_output[65536], serial_input[65536];
+static size_t serial_out_head, serial_out_count, serial_in_head, serial_in_count;
+
+static void serial_output_cb(void *opaque, uint8_t c) {
+    (void)opaque;
+    if (getenv("HV_SERIAL_STDERR")) { fputc(c, stderr); if (c == '\n') fflush(stderr); }
+    os_unfair_lock_lock(&serial_lock);
+    if (serial_out_count == sizeof serial_output) {
+        serial_out_head = (serial_out_head + 1) % sizeof serial_output;
+        serial_out_count--;
+    }
+    serial_output[(serial_out_head + serial_out_count++) % sizeof serial_output] = c;
+    os_unfair_lock_unlock(&serial_lock);
+}
+
+size_t hv_winvm_serial_read(uint8_t *bytes, size_t capacity) {
+    os_unfair_lock_lock(&serial_lock);
+    size_t n = capacity < serial_out_count ? capacity : serial_out_count;
+    for (size_t i = 0; i < n; i++) bytes[i] = serial_output[(serial_out_head + i) % sizeof serial_output];
+    serial_out_head = (serial_out_head + n) % sizeof serial_output;
+    serial_out_count -= n;
+    os_unfair_lock_unlock(&serial_lock);
+    return n;
+}
+
+size_t hv_winvm_serial_write(const uint8_t *bytes, size_t length) {
+    os_unfair_lock_lock(&serial_lock);
+    size_t room = sizeof serial_input - serial_in_count;
+    size_t n = length < room ? length : room;
+    for (size_t i = 0; i < n; i++) serial_input[(serial_in_head + serial_in_count++) % sizeof serial_input] = bytes[i];
+    os_unfair_lock_unlock(&serial_lock);
+    return n;
+}
+
 static void board_poll(void) {
+    os_unfair_lock_lock(&serial_lock);
+    while (board.uart && serial_in_count && hv_pl011_receive(board.uart, serial_input[serial_in_head])) {
+        serial_in_head = (serial_in_head + 1) % sizeof serial_input;
+        serial_in_count--;
+    }
+    os_unfair_lock_unlock(&serial_lock);
     if (net_on) hv_net_poll();
 }
 
@@ -188,6 +229,10 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
                           d0_ptr, d1_ptr, mac, c->enable_sound) != 0) {
         return fail(err, errlen, "Cannot create virtual ARM64 Windows board (insufficient RAM or missing firmware).");
     }
+    os_unfair_lock_lock(&serial_lock);
+    serial_out_head = serial_out_count = serial_in_head = serial_in_count = 0;
+    os_unfair_lock_unlock(&serial_lock);
+    board.uart->output = serial_output_cb;
     hv_winvirt_reset_cpu(&board);
 
     share_on = 0;
@@ -348,22 +393,33 @@ void hv_winvm_power_button(void) {
 }
 
 void hv_winvm_key_hid(uint8_t usage, int down) {
-    if (board.usb) hv_xhci_key(board.usb, usage, down);
+    if (board.keyboard) hv_winvm_key_linux(hv_linux_key_from_hid(usage), down);
+    else if (board.usb) hv_xhci_key(board.usb, usage, down);
 }
 
 void hv_winvm_key_linux(uint16_t code, int down) {
-    if (board.usb) hv_xhci_key_linux(board.usb, code, down);
+    if (board.keyboard && code) {
+        hv_virtio_input_send(board.keyboard, HV_EV_KEY, code, down);
+        hv_virtio_input_send(board.keyboard, HV_EV_SYN, 0, 0);
+    } else if (board.usb) hv_xhci_key_linux(board.usb, code, down);
 }
 
 void hv_winvm_tablet(double x_norm, double y_norm, uint8_t buttons, int8_t wheel) {
-    if (!board.usb) return;
+    if (!board.usb && !board.touchscreen) return;
     if (x_norm < 0.0) x_norm = 0.0;
     if (x_norm > 1.0) x_norm = 1.0;
     if (y_norm < 0.0) y_norm = 0.0;
     if (y_norm > 1.0) y_norm = 1.0;
     int ax = (int)(x_norm * 32767.0 + 0.5);
     int ay = (int)(y_norm * 32767.0 + 0.5);
-    hv_xhci_tablet(board.usb, ax, ay, buttons, wheel);
+    if (board.touchscreen) {
+        hv_virtio_input_send(board.touchscreen, HV_EV_ABS, HV_ABS_X, ax);
+        hv_virtio_input_send(board.touchscreen, HV_EV_ABS, HV_ABS_Y, ay);
+        hv_virtio_input_send(board.touchscreen, HV_EV_KEY, HV_BTN_TOUCH, !!(buttons & 1));
+        hv_virtio_input_send(board.touchscreen, HV_EV_SYN, 0, 0);
+    } else {
+        hv_xhci_tablet(board.usb, ax, ay, buttons, wheel);
+    }
 }
 
 void hv_winvm_send_ctrl_alt_del(void) {

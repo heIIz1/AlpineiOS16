@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "winvirt.h"
+#include "virtio_gpu.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -96,6 +97,8 @@ static uint64_t tick_locked(HvMachine *m, HvCpu *cpu) {
     hv_pl031_tick(b->rtc);
     if (b->poll) b->poll();
     hv_xhci_poll(b->usb);
+    hv_virtio_input_poll(b->keyboard);
+    hv_virtio_input_poll(b->touchscreen);
     if (b->hda) hv_hda_poll(b->hda);
     if (b->snd) hv_virtio_snd_poll(b->snd);
     return deadline;
@@ -205,9 +208,20 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     static const uint8_t default_mac[6] = {0x02, 0x57, 0x49, 0x4e, 0x00, 0x01};
     b->net = hv_virtio_net_create(m, b->pcie, mac ? mac : default_mac);
     if (disk0) b->nvme0 = hv_nvme_create(m, b->pcie, disk0, "WIN11IOS01");
-    b->usb = hv_xhci_create(m, b->pcie);
-    b->hda = hv_hda_create(m, b->pcie);
+    /* The phone profile uses VirtIO input and skips xHCI to avoid delaying udev. */
+    if (!getenv("HV_NO_USB")) b->usb = hv_xhci_create(m, b->pcie);
+    if (!getenv("HV_NO_AUDIO")) b->hda = hv_hda_create(m, b->pcie);
     if (disk1) b->nvme1 = hv_nvme_create(m, b->pcie, disk1, "WIN11INST");
+    const char *mode = getenv("HV_VIRTIO_DISPLAY");
+    if (mode) {
+        unsigned width, height;
+        if (sscanf(mode, "%ux%u", &width, &height) != 2 ||
+            width < 320 || height < 320 || width > 2048 || height > 2048)
+            return -1;
+        if (hv_virtio_gpu_create(m, b->pcie, b->fb, width, height)) return -1;
+        b->keyboard = hv_virtio_input_create(m, b->pcie, HV_VINPUT_KEYBOARD);
+        b->touchscreen = hv_virtio_input_create(m, b->pcie, HV_VINPUT_TOUCHSCREEN);
+    }
     (void)enable_sound;
 
     m->tick = tick;

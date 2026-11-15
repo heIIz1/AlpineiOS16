@@ -19,6 +19,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <removefile.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -754,8 +755,32 @@ static int open_url_put(Conn *c, Request *r) {
     return respond_empty(c, r, 400, "Bad Request");
 }
 
+/* Pack both values in one atomic so the HTTP reply is a consistent reading. */
+static atomic_uint host_battery;
+
+void hv_share_set_battery(int percent, HvBatteryState state) {
+    unsigned level = percent >= 0 && percent <= 100 ? (unsigned)percent + 1 : 0;
+    atomic_store(&host_battery, (level << 8) | (unsigned)state);
+}
+
+static int serve_battery(Conn *c, Request *r) {
+    if (strcmp(r->method, "GET")) return respond_empty(c, r, 405, "Method Not Allowed");
+    if (body_discard(c, r) != 0) return -1;
+    static const char *const states[] = {"unknown", "unplugged", "charging", "full"};
+    unsigned value = atomic_load(&host_battery);
+    unsigned state = value & 255;
+    unsigned level = value >> 8;
+    char percent[8] = "null";
+    if (level) snprintf(percent, sizeof percent, "%u", level - 1);
+    char json[96];
+    int n = snprintf(json, sizeof json, "{\"percent\":%s,\"state\":\"%s\"}\n",
+                     percent, state <= HV_BATTERY_FULL ? states[state] : states[0]);
+    return respond(c, r, 200, "OK", "Content-Type: application/json\r\nCache-Control: no-store\r\n", json, (size_t)n);
+}
+
 static int serve_henge(Conn *c, Request *r) {
     const char *what = r->path + strlen("/.henge/");
+    if (!strcmp(what, "battery")) return serve_battery(c, r);
     if (!strcmp(what, "install") && !strcmp(r->method, "GET")) {
         if (body_discard(c, r) != 0) return -1;
         return respond(c, r, 200, "OK", "Content-Type: text/plain\r\n", install_script, sizeof install_script - 1);

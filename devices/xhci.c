@@ -970,6 +970,13 @@ static const uint8_t linux_to_hid[256] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
+uint16_t hv_linux_key_from_hid(uint8_t usage) {
+    if (usage)
+        for (unsigned code = 1; code < sizeof linux_to_hid; code++)
+            if (linux_to_hid[code] == usage) return (uint16_t)code;
+    return 0;
+}
+
 void hv_xhci_key_linux(HvXhci *x, uint16_t code, int down) {
     if (code < 256) hv_xhci_key(x, linux_to_hid[code], down);
 }

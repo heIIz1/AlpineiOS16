@@ -11,11 +11,15 @@
    button a keyboard. Events come from the host UI on any thread
    (hv_virtio_input_send) and reach the guest from the CPU thread
    (hv_virtio_input_poll, from the board's tick). */
-enum { HV_VINPUT_KEYBOARD, HV_VINPUT_MOUSE };
+enum { HV_VINPUT_KEYBOARD, HV_VINPUT_MOUSE, HV_VINPUT_TOUCHSCREEN };
 
 #define HV_EV_SYN 0
 #define HV_EV_KEY 1
 #define HV_EV_REL 2
+#define HV_EV_ABS 3
+#define HV_ABS_X 0
+#define HV_ABS_Y 1
+#define HV_BTN_TOUCH 0x14a
 #define HV_REL_X 0
 #define HV_REL_Y 1
 #define HV_REL_HWHEEL 6

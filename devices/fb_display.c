@@ -56,6 +56,7 @@ static void on_ramfb_write(void *opaque, const uint8_t *data, uint32_t len) {
     fb->height = height;
     fb->stride = stride;
     fb->fourcc = fourcc;
+    fb->frame_generation = 0;
     fb->active = 1;
     pthread_mutex_unlock(&fb->mu);
 

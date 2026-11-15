@@ -69,7 +69,7 @@ extern uint64_t winios_brk_probe(void);
     } while (0)
 
 /* Executable JIT pages above 0x7000000000 hang on iOS 26/27 TXM devices.
- * Reserve a 512 MiB zero-fill block in __DATA at launch so it sits inside the
+ * Reserve a 128 MiB zero-fill block in __DATA at launch so it sits inside the
  * low < 0x180000000 window, then deallocate it immediately before debugserver's
  * `_M<size>,rx` allocation takes the first-fit hole. */
 #define WINIOS_JIT_LOW_LIMIT 0x7000000000ull
@@ -94,7 +94,7 @@ static void prealloc_ledger_exempt_ram(void) {
     sysctlbyname("hw.memsize", &phys_mem, &len, NULL, 0);
     uint64_t phys_mb = phys_mem >> 20;
     /* Size Guest RAM to fit comfortably within iOS 36-bit user VA ceiling alongside TXM JIT RX/RW + JIT tables */
-    static const uint64_t candidates_mb[] = {4608, 4096, 3584, 3072, 2560, 2048};
+    static const uint64_t candidates_mb[] = {1536};
     for (size_t i = 0; i < sizeof(candidates_mb) / sizeof(candidates_mb[0]); i++) {
         uint64_t mb = candidates_mb[i];
         if (phys_mb > 0 && mb + 2560 > phys_mb) continue;

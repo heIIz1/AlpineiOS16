@@ -32,6 +32,9 @@ int hv_winvm_run_cpu0(void);
 void hv_winvm_stop(void);
 void hv_winvm_power_button(void);
 void hv_winvm_flush_disks(void);
+/* Thread-safe UART transport. Input is delivered by the CPU's board poll. */
+size_t hv_winvm_serial_read(uint8_t *bytes, size_t capacity);
+size_t hv_winvm_serial_write(const uint8_t *bytes, size_t length);
 
 /* Display & screenshot hooks (any thread) */
 void hv_winvm_set_display_layer(void *ca_metal_layer);

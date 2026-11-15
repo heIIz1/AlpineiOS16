@@ -1,4 +1,12 @@
-# Third-Party Notices & Upstream Attributions
+# AlpineiOS credits and third-party notices
+
+AlpineiOS is maintained by Lumid-Off and is distributed under [GPL-2.0-or-later](LICENSE). The app and VM derive from Ammaar Reshi’s WindowsiOS and Levii’s Henge. [WindowsiOS](https://github.com/ammaarreshi/WindowsiOS) · [Henge](https://github.com/Leviidev/Henge)
+
+The app icon is drawn in Core Graphics. [Icon source](tools/render-app-icon.swift)
+
+The Phosh desktop, compositor, keyboard and guest packages come from the postmarketOS, Alpine Linux, Phosh and GNOME communities. The guest image has its own package inventory with versions and licenses. [Phosh image and package inventory](https://github.com/Lumid-Off/AlpineiOS-images)
+
+The Windows-specific notices below preserve historical attributions from WindowsiOS. The AlpineiOS release does not include Windows, Windows drivers or Windows applications.
 
 `WindowsiOS` is licensed as a whole under the **GNU General Public License v2.0 or later** (`GPL-2.0-or-later`; see [`LICENSE`](LICENSE)), preserving all upstream copyright notices and copyleft obligations from [`Leviidev/Henge`](https://github.com/Leviidev/Henge) and [`Leviidev/Husk`](https://github.com/Leviidev/Husk).
 
@@ -11,7 +19,7 @@ This project stands on the shoulders of extraordinary open-source systems engine
 | Component | Upstream Project / Authors | License | How Used in `WindowsiOS` |
 | :--- | :--- | :--- | :--- |
 | **Henge** (`HengeVM`) | [`Leviidev/Henge`](https://github.com/Leviidev/Henge) & [`Leviidev/Henge#7`](https://github.com/Leviidev/Henge/pull/7) (Levii & contributors) | `GPL-2.0-or-later` | Foundational ARM64-to-ARM64 dynamic binary translator, stage-1 software MMU foundation, block/IJC/return caches (`core/`, `host/enter.S`, `host/jit_region.c`), `/.henge` WebDAV share server (`host/share.c`), and iOS 26/27 TXM dual-mapped JIT substrate (`ios/Sources/Native/winios_jit.c`, `winios_brk.S`, `henge-jit.js`) |
-| **Husk** | [`Leviidev/Husk`](https://github.com/Leviidev/Husk) (Levii & contributors) | `GPL-2.0-or-later` | ARM64 JIT architecture & translation insights, iOS `libslirp` cross-build patches, and on-device JIT helper integration (`scripts/build_ios_deps.sh`) |
+| **Husk** | [`Leviidev/Husk`](https://github.com/Leviidev/Husk) (Levii & contributors) | `GPL-2.0-or-later` | ARM64 JIT architecture & translation insights, historical iOS `libslirp` cross-build patches, and on-device JIT helper integration |
 | **LinuxRunner** | [`mxhm11cr/LinuxRunner`](https://github.com/mxhm11cr/LinuxRunner) (derived from `ish-app/ish` & `rcarmo/ios-linuxkit`) | `GPL-2.0` / `GPL-3.0` | Architectural inspiration and early ARM64 guest OS bring-up & iOS runtime discipline patterns (no GPL-3.0-only source files linked) |
 | **StikDebug / StikJIT** | [`StephenDev0/StikDebug`](https://github.com/StephenDev0/StikDebug) / `StikJIT` (BluDood / StephenDev0 & contributors) + [`jkcoxson/idevice`](https://github.com/jkcoxson/idevice) | `MPL-2.0` / `BSD-3-Clause` / `MIT` | On-device iOS 26/27 TXM debugger & JIT page-blessing protocol (`universal.js` / `ios/Sources/Resources/henge-jit.js`, `BRK #0x69` / `BRK #0xF00D` dual-mapped RX/RW regions, and `CS_DEBUGGED` ledger-exempt memory setup) |
 | **libslirp** | [`gitlab.freedesktop.org/slirp/libslirp`](https://gitlab.freedesktop.org/slirp/libslirp) / [`utmapp/libslirp`](https://github.com/utmapp/libslirp) (Danny Gasparovski, Fabrice Bellard, QEMU & libslirp contributors) | `BSD-3-Clause` | User-mode TCP/IP + DHCP + DNS NAT stack (`10.0.2.0/24`) linked via `host/net_slirp.c` (fetched & cross-compiled at build time by `scripts/build_ios_deps.sh`) |
@@ -70,7 +78,7 @@ Credited with gratitude for demonstrating early guest OS bring-up workflows, iOS
 
 On iOS 26 and iOS 27 devices equipped with Apple's Trusted Execution Monitor (**TXM**), hardware enforcement blocks ordinary `MAP_JIT` execution without debugger page-blessing. `WindowsiOS` uses the `BRK #0x69` / `BRK #0xF00D` protocol (`ios/Sources/Native/winios_brk.S`, `ios/Sources/Resources/henge-jit.js`, and `scripts/_lldb_txm_jit.py`) pioneered by `StikDebug` / `StikJIT` and adapted by `Leviidev/Henge` to allocate and bless dual-mapped RX/RW JIT regions (`_M<size>,rx` + `vm_remap`) and pre-allocate ledger-exempt guest RAM while `CS_DEBUGGED` is active prior to debugger detach.
 
-- `StikJIT` framework components (when optionally staged via `scripts/build_ios_deps.sh`) are governed by the **Mozilla Public License Version 2.0** (`MPL-2.0`, compatible with `GPL-2.0-or-later` Larger Works under MPL-2.0 Section 3.3). Full MPL-2.0 text: <https://www.mozilla.org/MPL/2.0/>.
+- Upstream `StikJIT` framework components are governed by the **Mozilla Public License Version 2.0** (`MPL-2.0`, compatible with `GPL-2.0-or-later` Larger Works under MPL-2.0 Section 3.3). Full MPL-2.0 text: <https://www.mozilla.org/MPL/2.0/>.
 - `idevice` (Copyright (c) Jackson Coxson) is licensed under the **MIT License**.
 
 ---
@@ -116,7 +124,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ### Build-Time Static Dependencies of `libslirp` on iOS (`scripts/build_ios_deps.sh`)
 
 When building `ios/deps/` locally:
-- **GLib `2.83.0` & `proxy-libintl`:** Licensed under `LGPL-2.1-or-later` (<https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html>).
+- **GLib `2.83.0` and GVDB:** Licensed under `LGPL-2.1-or-later` (<https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html>).
+- **proxy-libintl:** GNU Library GPL v2 or later (LGPL-2.0-or-later), as stated in its source headers.
 - **libffi `3.5.0`:** Copyright (c) 1996-2024 Anthony Green, Red Hat, Inc. and contributors. Licensed under the `MIT` License.
 - **PCRE2:** Copyright (c) University of Cambridge / Philip Hazel. Licensed under `BSD-3-Clause`.
 
@@ -198,3 +207,14 @@ The following proprietary operating system and application packages are **never*
 
 - **Microsoft Windows 11 24H2 ARM64** (`Build 26100`) — Property of Microsoft Corporation, governed by the Microsoft Software License Terms. Users supply their own official Microsoft retail ARM64 ESD/ISO (`work/downloads/Win11_24H2_ARM64_en-us.esd`).
 - **Google Antigravity (`2.31.0` Windows ARM64)** — Property of Google LLC, governed by its respective terms of service.
+
+## SwiftTerm (AlpineiOS addition)
+
+SwiftTerm v1.9.0, commit 8840e3596739adfe9599c0e7fff89f4fa88bedcf, by Miguel de Icaza and contributors.
+https://github.com/migueldeicaza/SwiftTerm — MIT license, included at ThirdParty/SwiftTerm/LICENSE.
+Vendored sources use a local iOS-only package manifest without desktop process dependencies.
+
+
+## Release source bundles
+
+The app sources are available in the Git tag for the release. The dependency archive supplies GLib with GVDB, libffi, libslirp, proxy-libintl, PCRE2 and its Meson patch with their upstream notices. To rebuild or relink the app, unpack the archive at the repository root, optionally replace or modify the relevant source, and run scripts/build_alpine_ios.sh. The build uses the included inputs in work/ios_deps_build.

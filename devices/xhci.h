@@ -69,6 +69,7 @@ HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus);
 /* Any thread: HID usage page 7 key down/up (e.g. 4 = A; 0xe0-0xe7 modifiers). */
 void hv_xhci_key(HvXhci *x, uint8_t usage, int down);
 /* Any thread: Linux input key code down/up. */
+uint16_t hv_linux_key_from_hid(uint8_t usage);
 void hv_xhci_key_linux(HvXhci *x, uint16_t code, int down);
 /* Any thread: USB HID Absolute Tablet event (x, y in 0..32767; buttons bit0=L, bit1=R, bit2=M; wheel -127..127). */
 void hv_xhci_tablet(HvXhci *x, int abs_x, int abs_y, uint8_t buttons, int8_t wheel);

@@ -41,3 +41,14 @@ ios/DerivedData/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Local SwiftPM, signing, machine credentials, and host-share sessions
+.swiftpm/
+xcuserdata/
+*.mobileprovision
+*.p12
+login.txt
+desktop-login.txt
+seed-data/
+share-tmp/
+*.sock
