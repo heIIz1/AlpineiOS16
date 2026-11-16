@@ -8,7 +8,7 @@ AlpineiOS runs a local ARM64 postmarketOS virtual machine inside an iPhone app. 
 
 ## Requirements
 
-- **Tested device:** iPhone 14 Pro with iOS 27.0. The app targets iOS 17. VM and JIT compatibility on other devices and OS versions is unverified.
+- **Tested device:** iPhone 14 Pro with iOS 27.0. The app targets iOS 16.1; VM and JIT compatibility on other devices and OS versions is unverified. On iOS 16, enable JIT through TrollStore or StikDebug (see below).
 - **Build and launch:** Apple silicon Mac, Xcode with support for the connected iPhone (tested with Xcode 27.2), Homebrew, an Apple development team for signing and Developer Mode on the iPhone.
 - **Storage and network:** Allow at least 5 GB of free space on the phone for the roughly 1.9 GB download, unpacking and apps. The initial setup and package installs need internet access.
 
@@ -23,6 +23,10 @@ The download includes Phosh and Settings. Firefox, Files (Nautilus), and GNOME C
 On the first launch, choose the apps you want and tap **Download and install**. The default image is hosted on GitHub Releases. [Phosh image downloads](https://github.com/Lumid-Off/AlpineiOS-images/releases/tag/phosh-26.06-r1) AlpineiOS verifies the assets with SHA-256, unpacks the disk, then boots when JIT is available. The guest downloads the selected apps after boot. You can choose a local password for `user` and `doas`, or leave it blank to generate one. The current password is in **Help**.
 
 Open **Installation log** to see download stages, transferred bytes and Linux package output. The log stays available after errors and can be shared from its toolbar. During Linux setup, tap the installation status at the bottom of the screen to open it.
+
+## Enabling JIT
+
+The VM compiles guest code into executable memory, and iOS only allows that after it marks the app debuggable. With TrollStore installed, tap **Enable JIT with TrollStore**; the app also asks once by itself when an installed machine is waiting. TrollStore attaches to the running app and detaches again, which grants the permission, and AlpineiOS starts the VM as soon as it is back in the foreground. **Enable JIT with StikDebug** or the debugger script below work instead of TrollStore, and a jailbroken device may need neither.
 
 Set `ALPINE_IMAGE_MANIFEST_URL` at build time to use a different default URL. To create and stage the assets for your own server, run these commands on an Apple silicon Mac with QEMU and Python installed.
 

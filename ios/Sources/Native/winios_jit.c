@@ -17,6 +17,7 @@
 #include <os/log.h>
 #include <os/proc.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -203,11 +204,39 @@ static void release_low_hold(size_t bytes) {
     g_jit_reserve_released = true;
 }
 
+static sigjmp_buf g_selftest_jmp;
+static volatile sig_atomic_t g_selftest_probing;
+
+static void selftest_fault(int sig, siginfo_t *info, void *ctx) {
+    (void)info;
+    (void)ctx;
+    if (g_selftest_probing) siglongjmp(g_selftest_jmp, 1);
+    _exit(128 + sig);
+}
+
 static bool jit_selftest(const WinIosDualMapping *m) {
     /* movz w0, #42 ; ret */
     static const uint32_t kCode[2] = {0x52800540u, 0xD65F03C0u};
     if (!m->rw_addr || !m->rx_addr || m->size < 16384) return false;
 
+    /* A mapping that does not work must fail here, not kill the app: catch the
+       faults this probe causes (a JIT page that rejects writes, an alias that
+       will not execute) and report the probe as failed instead. */
+    struct sigaction probe, old[3];
+    memset(&probe, 0, sizeof probe);
+    probe.sa_flags = SA_SIGINFO | SA_NODEFER;
+    probe.sa_sigaction = selftest_fault;
+    int sigs[3] = {SIGBUS, SIGILL, SIGSEGV};
+    for (int i = 0; i < 3; i++) sigaction(sigs[i], &probe, &old[i]);
+    if (sigsetjmp(g_selftest_jmp, 1) != 0) {
+        g_selftest_probing = 0;
+        for (int i = 0; i < 3; i++) sigaction(sigs[i], &old[i], NULL);
+        WINIOS_LOG("selftest FAIL: faulted on JIT memory (write or execute rejected)");
+        return false;
+    }
+    g_selftest_probing = 1;
+
+    bool ok = true;
     const size_t offsets[2] = {0, m->size - 16384};
     for (int i = 0; i < 2; i++) {
         size_t off = offsets[i];
@@ -218,28 +247,114 @@ static bool jit_selftest(const WinIosDualMapping *m) {
         memcpy(rb, m->rx_addr + off, sizeof rb);
         if (rb[0] != kCode[0] || rb[1] != kCode[1]) {
             WINIOS_LOG("selftest FAIL at +%#zx: alias mismatch (%08x %08x)", off, rb[0], rb[1]);
-            return false;
+            ok = false;
+            break;
         }
         int (*fn)(void) = (int (*)(void))(void *)(m->rx_addr + off);
         int rc = fn();
         if (rc != 42) {
             WINIOS_LOG("selftest FAIL at +%#zx: expected 42, got %d", off, rc);
-            return false;
+            ok = false;
+            break;
         }
     }
-    WINIOS_LOG("selftest PASS: executed RX code at %p and +%#zx -> 42",
-               (void *)m->rx_addr, m->size - 16384);
+    g_selftest_probing = 0;
+    for (int i = 0; i < 3; i++) sigaction(sigs[i], &old[i], NULL);
+    if (ok)
+        WINIOS_LOG("selftest PASS: executed RX code at %p and +%#zx -> 42",
+                   (void *)m->rx_addr, m->size - 16384);
+    return ok;
+}
+
+/* A plain RWX mapping rw == rx: no aliasing, no JIT write protection. The
+   jailbroken kernel (Dopamine) and any process with CS_DEBUGGED (set by
+   TrollStore's enable-JIT, StikDebug, or a debugger) allows it on iOS < 26. */
+static bool try_plain_rwx(size_t bytes) {
+    void *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED) {
+        WINIOS_LOG("plain RWX mmap failed: %s", strerror(errno));
+        return false;
+    }
+    WinIosDualMapping m = {(uint8_t *)p, (uint8_t *)p, bytes};
+    if (!jit_selftest(&m)) {
+        munmap(p, bytes);
+        return false;
+    }
+    g_mapping = m;
+    release_low_hold(bytes);
+    prealloc_ledger_exempt_ram();
+    atomic_store(&g_jit_live, true);
+    set_status("Live (%zu MiB RWX)", bytes >> 20);
     return true;
 }
 
+/* A writable mapping and a separate executable alias of the same pages, the
+   shape a debugger grants on TXM and that CS_DEBUGGED permits on iOS < 26. */
+static bool try_dual_mapping(size_t bytes) {
+    uint8_t *rx = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+    if (rx == MAP_FAILED)
+        rx = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (rx == MAP_FAILED) {
+        WINIOS_LOG("dual mapping mmap failed: %s", strerror(errno));
+        return false;
+    }
+#if TARGET_OS_OSX
+    pthread_jit_write_protect_np(0);
+#endif
+    vm_address_t rw = 0;
+    vm_prot_t cur, max;
+    kern_return_t remap_kr = vm_remap(mach_task_self(), &rw, bytes, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
+                                      (vm_address_t)rx, FALSE, &cur, &max, VM_INHERIT_NONE);
+    kern_return_t rxprot_kr = (remap_kr == KERN_SUCCESS) ?
+        vm_protect(mach_task_self(), (vm_address_t)rx, bytes, FALSE, VM_PROT_READ | VM_PROT_EXECUTE) : remap_kr;
+    kern_return_t rwprot_kr = (rxprot_kr == KERN_SUCCESS) ?
+        vm_protect(mach_task_self(), rw, bytes, FALSE, VM_PROT_READ | VM_PROT_WRITE) : rxprot_kr;
+    if (remap_kr == KERN_SUCCESS && rxprot_kr == KERN_SUCCESS && rwprot_kr == KERN_SUCCESS) {
+        WinIosDualMapping m = {(uint8_t *)rw, rx, bytes};
+        if (jit_selftest(&m)) {
+            g_mapping = m;
+            release_low_hold(bytes);
+            prealloc_ledger_exempt_ram();
+            atomic_store(&g_jit_live, true);
+#if TARGET_OS_OSX
+            pthread_jit_write_protect_np(1);
+#endif
+            set_status("Live (%zu MiB RX/RW)", bytes >> 20);
+            return true;
+        }
+    }
+#if TARGET_OS_OSX
+    pthread_jit_write_protect_np(1);
+#endif
+    if (remap_kr == KERN_SUCCESS) vm_deallocate(mach_task_self(), rw, bytes);
+    munmap(rx, bytes);
+    WINIOS_LOG("dual mapping rejected (remap=%s rx=%s rw=%s)", mach_error_string(remap_kr),
+               mach_error_string(rxprot_kr), mach_error_string(rwprot_kr));
+    return false;
+}
+
+/* TrollStore's enable-JIT attaches and detaches (ptrace PT_ATTACHEXC +
+   PT_DETACH), which sets CS_DEBUGGED without leaving a debugger behind, and
+   StikDebug/LLDB answer the brk protocol and hand out an RX region. The plain
+   mappings above come first because they need nothing running outside this
+   process; this is the TXM (iOS 26+) path and the last resort elsewhere. */
 bool winios_jit_acquire(size_t bytes, bool detach_after) {
     if (atomic_load(&g_jit_live)) return true;
     if (bytes == 0) bytes = WINIOS_JIT_DEFAULT_BYTES;
     bytes = (bytes + 0x3fffu) & ~(size_t)0x3fffu;
 
+    /* TXM (iOS 26+) rejects both of these, but they are the cheap path
+       everywhere else and the one that works with only CS_DEBUGGED. */
+    if (__builtin_available(iOS 26.0, *)) {
+        /* the debugger-brokered region below is the only way there */
+    } else {
+        if (try_plain_rwx(bytes)) return true;
+        if (try_dual_mapping(bytes)) return true;
+    }
+
     if (!winios_jit_is_debugger_attached()) {
-        set_status("Waiting for debugger (StikDebug or LLDB)");
-        WINIOS_LOG("acquire: CS_DEBUGGED not set yet");
+        set_status("JIT off: tap the button to enable it via TrollStore");
+        WINIOS_LOG("acquire: CS_DEBUGGED not set and no RWX mapping; TrollStore enable-JIT needed");
         return false;
     }
 
@@ -248,46 +363,13 @@ bool winios_jit_acquire(size_t bytes, bool detach_after) {
     g_expecting_jit_trap = false;
 
     if (probe == 0) {
-        /* Pre-iOS 26 fallback where CS_DEBUGGED permits plain vm_remap RX/RW without trap servicing */
-        if (!__builtin_available(iOS 26.0, *)) {
-            release_low_hold(bytes);
-            int mmap_flags = MAP_PRIVATE | MAP_ANON | MAP_JIT;
-            uint8_t *rx = mmap(NULL, bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
-            if (rx == MAP_FAILED) {
-                mmap_flags = MAP_PRIVATE | MAP_ANON;
-                rx = mmap(NULL, bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
-            }
-            if (rx != MAP_FAILED) {
-#if TARGET_OS_OSX
-                pthread_jit_write_protect_np(0);
-#endif
-                vm_address_t rw = 0;
-                vm_prot_t cur, max;
-                kern_return_t remap_kr = vm_remap(mach_task_self(), &rw, bytes, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
-                             (vm_address_t)rx, FALSE, &cur, &max, VM_INHERIT_NONE);
-                kern_return_t rxprot_kr = (remap_kr == KERN_SUCCESS) ?
-                    vm_protect(mach_task_self(), (vm_address_t)rx, bytes, FALSE, VM_PROT_READ | VM_PROT_EXECUTE) : remap_kr;
-                kern_return_t rwprot_kr = (rxprot_kr == KERN_SUCCESS) ?
-                    vm_protect(mach_task_self(), rw, bytes, FALSE, VM_PROT_READ | VM_PROT_WRITE) : rxprot_kr;
-                if (remap_kr == KERN_SUCCESS && rxprot_kr == KERN_SUCCESS && rwprot_kr == KERN_SUCCESS) {
-                    WinIosDualMapping m = {(uint8_t *)rw, rx, bytes};
-                    if (jit_selftest(&m)) {
-                        g_mapping = m;
-                        atomic_store(&g_jit_live, true);
-#if TARGET_OS_OSX
-                        pthread_jit_write_protect_np(1);
-#endif
-                        set_status("Live (%zu MiB plain RX/RW)", bytes >> 20);
-                        return true;
-                    }
-                }
-#if TARGET_OS_OSX
-                pthread_jit_write_protect_np(1);
-#endif
-                munmap(rx, bytes);
-            }
-        }
-        set_status("Debugger attached, waiting for brk trap handler");
+        /* CS_DEBUGGED (TrollStore) but nobody answers the breakpoints. On iOS
+           < 26 the mappings above should have worked, so this is iOS 26+:
+           debugger-brokered RX is required there. */
+        if (__builtin_available(iOS 26.0, *))
+            set_status("JIT off: use StikDebug (TrollStore cannot enable JIT on iOS 26+)");
+        else
+            set_status("JIT off: enable it via TrollStore or StikDebug");
         WINIOS_LOG("probe returned 0 (debugger did not answer brk #0x69)");
         return false;
     }

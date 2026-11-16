@@ -233,6 +233,8 @@ struct PhoshSetupView: View {
                 VStack(spacing: 9) {
                     primary("Start Linux", symbol: "play.fill") { vm.startOrRetry() }
                     if !vm.isJITLive {
+                        Button("Enable JIT with TrollStore") { vm.requestTrollStoreJIT() }
+                            .buttonStyle(.bordered)
                         Button("Enable JIT with StikDebug") { vm.requestStikDebugJIT() }
                             .buttonStyle(.bordered)
                     }

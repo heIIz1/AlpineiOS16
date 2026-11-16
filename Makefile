@@ -73,7 +73,7 @@ $(B):
 
 # ---- iOS static library target: build/ios/libwinvm.a ----
 IOS_SDK = $(shell xcrun --sdk iphoneos --show-sdk-path)
-IOS_CC = xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -isysroot $(IOS_SDK)
+IOS_CC = xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.1 -isysroot $(IOS_SDK)
 IOS_SLIRP_INC ?= ios/deps/include/slirp
 IOS_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -I$(IOS_SLIRP_INC)
 IOS_OBJCFLAGS = -fobjc-arc -Wall -Wextra -O2 -g -Icore -Ihost -Idevices

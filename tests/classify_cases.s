@@ -41,6 +41,7 @@ _hv_classify_cases:
     tlbi vmalle1                // sys
     dsb sy                      // barrier
     isb                         // barrier
+    .inst 0xd50330ff            // sb (FEAT_SB): barrier, translated to a host nop
     wfi                         // wait
     paciasp                     // pac
     autiasp                     // pac

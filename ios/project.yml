@@ -51,6 +51,10 @@ targets:
           NSAllowsLocalNetworking: true
           NSAllowsArbitraryLoadsInWebContent: true
         LSRequiresIPhoneOS: true
+        LSApplicationQueriesSchemes:
+          - apple-magnifier
+          - stikjit
+          - stikdebug
         UILaunchScreen: {}
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true

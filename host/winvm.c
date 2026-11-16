@@ -4,6 +4,7 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <TargetConditionals.h>
+#include <fcntl.h>
 #include <os/lock.h>
 #include <pthread.h>
 #include <pthread/qos.h>
@@ -126,13 +127,47 @@ static void on_ill(int sig, siginfo_t *info, void *ctx) {
     uint64_t size = (uint64_t)m.jit.capacity * 4;
     int in_rx = pc >= rx && pc < rx + size;
     if (sig == SIGILL || in_rx) {
-        fprintf(stderr, "winvm: signal %d in JIT: host_pc=%llx (rx=%llx +%lld) addr=%p\n",
-                sig, (unsigned long long)pc, (unsigned long long)rx, (long long)(pc - rx), info->si_addr);
-        for (int i = 0; i < ncpus; i++) {
-            fprintf(stderr, "  cpu %d: guest_pc=%llx el=%u sctlr=%llx\n",
-                    i, (unsigned long long)cpus[i].pc, cpus[i].el, (unsigned long long)cpus[i].sctlr_el1);
+        /* The instruction the host refused to run. In the JIT this is a copy of
+           the guest's own instruction, so it says what the guest executed. */
+        uint32_t insn = 0;
+        memcpy(&insn, (const void *)(uintptr_t)pc, sizeof insn);
+        char report[1024];
+        int n = snprintf(report, sizeof report,
+                         "winvm: signal %d (%s) in JIT: host_pc=%llx (rx=%llx +%lld) addr=%p\n"
+                         "  insn=%08x esr=%08x far=%llx sp=%llx lr=%llx\n",
+                         sig, sig == SIGILL ? "SIGILL" : sig == SIGBUS ? "SIGBUS" : "SIGSEGV",
+                         (unsigned long long)pc, (unsigned long long)rx, (long long)(pc - rx), info->si_addr,
+                         insn, uc->uc_mcontext->__es.__esr,
+                         (unsigned long long)uc->uc_mcontext->__es.__far,
+                         (unsigned long long)uc->uc_mcontext->__ss.__sp,
+                         (unsigned long long)uc->uc_mcontext->__ss.__lr);
+        if (hv_self) {
+            n += snprintf(report + n, sizeof report - (size_t)n,
+                          "  faulting vCPU: guest_pc=%llx el=%u sctlr=%llx\n",
+                          (unsigned long long)hv_self->pc, hv_self->el,
+                          (unsigned long long)hv_self->sctlr_el1);
         }
+        for (int i = 0; i < ncpus && n < (int)sizeof report; i++) {
+            n += snprintf(report + n, sizeof report - (size_t)n,
+                          "  cpu %d: guest_pc=%llx el=%u sctlr=%llx\n",
+                          i, (unsigned long long)cpus[i].pc, cpus[i].el, (unsigned long long)cpus[i].sctlr_el1);
+        }
+        fputs(report, stderr);
         fflush(stderr);
+        /* Keep it after the app dies, for the next launch (and bug reports).
+           Documents is visible in the Files app and Finder (file sharing). */
+        const char *home = getenv("HOME");
+        const char *tmp = getenv("TMPDIR");
+        char path[256], fallback[256];
+        snprintf(path, sizeof path, "%s/Documents/alpineios-last-signal.log", home ? home : "/tmp");
+        snprintf(fallback, sizeof fallback, "%s/alpineios-last-signal.log", tmp ? tmp : "/tmp");
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) fd = open(fallback, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            ssize_t ignored = write(fd, report, strlen(report));
+            (void)ignored;
+            close(fd);
+        }
     }
     struct sigaction *prior = sig == SIGILL ? &prior_ill : sig == SIGBUS ? &prior_bus : &prior_segv;
     sigaction(sig, prior, NULL);

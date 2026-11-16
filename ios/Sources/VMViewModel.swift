@@ -139,7 +139,9 @@ final class VMViewModel: ObservableObject {
 
     func onAppBecameActive() {
         let b = WinIOSBridge.shared
-        if !b.isJITLive && b.isDebuggerAttached {
+        // CS_DEBUGGED may have been set while we were in the background
+        // (TrollStore's enable-JIT attaches and detaches), so always retry.
+        if !b.isJITLive {
             _ = b.tryAcquireJIT(true)
         }
         syncFromBridge()
@@ -147,6 +149,8 @@ final class VMViewModel: ObservableObject {
             didAutoLaunchAttempt = true
             b.prepareAndStart(with: nil)
             syncFromBridge()
+        } else if !b.isJITLive && hasMachine && !b.isUnpacking && installTask == nil && imageStatus == nil {
+            autoEnableJITIfNeeded()
         }
     }
 
@@ -170,7 +174,14 @@ final class VMViewModel: ObservableObject {
     }
 
     func startOrRetry() {
-        didAutoLaunchAttempt = isJITLive
+        guard WinIOSBridge.shared.isJITLive else {
+            if !requestTrollStoreJIT() {
+                WinIOSBridge.shared.prepareAndStart(with: nil)
+                syncFromBridge()
+            }
+            return
+        }
+        didAutoLaunchAttempt = true
         WinIOSBridge.shared.prepareAndStart(with: nil)
         syncFromBridge()
     }
@@ -224,6 +235,39 @@ final class VMViewModel: ObservableObject {
     }
 
     func cancelDownload() { installTask?.cancel() }
+
+    /// TrollStore's enable-JIT helper attaches to this process and detaches
+    /// again, which sets CS_DEBUGGED without leaving a debugger behind; the
+    /// app keeps running, so it can then map executable memory itself on iOS 16.
+    /// (On iOS 26+ the debugger-brokered region is still required.)
+    private static let trollStoreJITKey = "lastTrollStoreJITAttempt"
+    private static let trollStoreJITCooldown: TimeInterval = 60
+
+    @discardableResult
+    func requestTrollStoreJIT() -> Bool {
+        if #available(iOS 26.0, *) {
+            jitStatusText = "TrollStore cannot enable JIT on iOS 26+. Use StikDebug."
+            return false
+        }
+        guard let bundleID = Bundle.main.bundleIdentifier,
+              let url = URL(string: "apple-magnifier://enable-jit?bundle-id=\(bundleID)") else { return false }
+        guard UIApplication.shared.canOpenURL(url) else {
+            jitStatusText = "TrollStore is not installed. Use StikDebug to enable JIT."
+            return false
+        }
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.trollStoreJITKey)
+        UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        return true
+    }
+
+    /// Ask TrollStore once per launch-and-return cycle, and not again for a
+    /// while if it did not help, so a failure cannot loop through the app.
+    private func autoEnableJITIfNeeded() {
+        guard UIApplication.shared.applicationState == .active else { return }
+        let last = UserDefaults.standard.double(forKey: Self.trollStoreJITKey)
+        guard Date().timeIntervalSince1970 - last > Self.trollStoreJITCooldown else { return }
+        _ = requestTrollStoreJIT()
+    }
 
     func requestStikDebugJIT() {
         guard let bundleID = Bundle.main.bundleIdentifier else { return }

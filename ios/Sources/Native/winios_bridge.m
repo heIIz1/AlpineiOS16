@@ -414,7 +414,7 @@ static NSString *hostChip(NSString *model) {
     if (!self.isJITLive) {
         [self tryAcquireJIT:YES];
         if (!self.isJITLive) {
-            _vmStatus = @"Waiting for TXM JIT (attach StikDebug or launch_on_iphone.sh)";
+            _vmStatus = @"JIT is off: tap Enable JIT with TrollStore (or StikDebug), then Start Linux.";
             [self notifyChanged];
             return;
         }

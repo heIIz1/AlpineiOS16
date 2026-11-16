@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Dual-mapped RX/RW JIT allocator for iOS 17..27 (including iOS 26/27 TXM).
+ * JIT allocator for iOS 16..27 (including iOS 26/27 TXM): a plain RWX mapping
+ * where the kernel allows it (jailbreak, CS_DEBUGGED), a writable/executable
+ * alias pair otherwise, and the debugger-brokered region on TXM.
  * Adapted from Henge (Leviidev/Henge, GPL-2.0-or-later).
  */
 #ifndef WINIOS_JIT_H

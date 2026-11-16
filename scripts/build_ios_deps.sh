@@ -17,7 +17,7 @@ mkdir -p "$DL" "$SRC" "$PREFIX" "$STAMPS" "$OUT_DEPS/lib" "$OUT_DEPS/include"
 
 ARCH=arm64
 SDK=iphoneos
-SDKMINVER=17.0
+SDKMINVER=16.1
 NCPU="$(sysctl -n hw.ncpu)"
 SDKROOT="$(xcrun --sdk $SDK --show-sdk-path)"
 CFLAGS_TARGET="-target $ARCH-apple-ios$SDKMINVER"

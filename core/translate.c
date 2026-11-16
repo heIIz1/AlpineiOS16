@@ -555,6 +555,15 @@ static uint32_t slot_of(int reg) {
 /* ---- instruction groups ---- */
 
 static void translate_copy(Emit *e, uint32_t insn) {
+    if ((insn & 0xfffff01fu) == 0xd503201fu) {
+        /* HINT space (NOP, YIELD, SEV, ESB, PSB, CSDB, BTI, unallocated hints):
+           run them all as a NOP. Most are hints anyway, but some need features
+           the host may not have, and hints take no register operands, so there
+           is nothing to rename. PAC forms are classified HV_INSN_PAC and never
+           reach here. */
+        put(e, 0xd503201fu);
+        return;
+    }
     uint32_t fields = hv_gpr_fields(insn);
     if (!fields) {
         put(e, insn);
@@ -1804,7 +1813,14 @@ static int translate_one(Emit *e, uint32_t insn, uint64_t pc) {
             else put_branch_exit(e, pc + 4, 0);
             return 1;
         }
-        put(e, insn); /* DSB, DMB, SB */
+        if (op2 == 4 || op2 == 5) { /* DSB, DMB: the host's own barrier */
+            put(e, insn);
+        } else { /* SB and the unallocated forms of this space: a nop for the host.
+                    SB is FEAT_SB (Armv8.5) and traps as undefined on older cores
+                    (e.g. A13), so it can never be copied through. It is purely a
+                    speculation barrier: there is nothing for the guest to see. */
+            put(e, 0xd503201fu);
+        }
         return 0;
     }
     case HV_INSN_WAIT:
