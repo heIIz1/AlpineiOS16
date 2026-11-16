@@ -24,7 +24,7 @@ struct PhoshSetupView: View {
     }
 
     var body: some View {
-        ScrollView {
+        ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 22) {
                 hero
                 if let status = vm.imageStatus {

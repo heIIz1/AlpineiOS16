@@ -204,7 +204,7 @@ struct SessionView: View {
                     .padding()
             }
         }
-        .onChange(of: displayProfile) { _, _ in WinIOSBridge.shared.refreshGuestDisplay() }
+        .onChange(of: displayProfile) { _ in WinIOSBridge.shared.refreshGuestDisplay() }
         .fileImporter(isPresented: $importingFile, allowedContentTypes: [.item]) { result in
             do { importFile(try result.get()) }
             catch { toolsMessage = error.localizedDescription }
@@ -224,7 +224,7 @@ struct SessionView: View {
         .sheet(isPresented: $showInstallationLog) { InstallationLogView(vm: vm) }
         .sheet(isPresented: $showHelp) {
             NavigationStack {
-                ScrollView {
+                ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 16) {
                         Text("First launch").font(.title2.bold())
                         Text("Choose apps and download a Phosh image from the setup screen. You can also import a prepared machine into Machines/PostmarketOS-Native using Files or Finder.")

@@ -14,7 +14,7 @@ struct InstallationLogView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
+            ScrollView(.vertical) {
                 Text(text)
                     .font(.system(.caption, design: .monospaced))
                     .textSelection(.enabled)

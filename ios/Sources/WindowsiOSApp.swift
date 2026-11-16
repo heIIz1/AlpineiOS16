@@ -13,7 +13,7 @@ struct WindowsiOSApp: App {
                 .onAppear {
                     viewModel.onAppBecameActive()
                 }
-                .onChange(of: scenePhase) { _, newPhase in
+                .onChange(of: scenePhase) { newPhase in
                     if newPhase == .active {
                         WinIOSBridge.shared.setGuestPaused(false)
                         viewModel.onAppBecameActive()

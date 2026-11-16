@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Build the missing ARM64 Mesa VirGL guest driver in a disposable Alpine VM."""
 import hashlib
+import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 import shutil
@@ -14,10 +15,10 @@ ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / 'work' / 'GuestGraphics'
 OUTPUT = ROOT / 'ios' / 'deps' / 'Resources' / 'guest-virgl.tar.gz'
 
-def stage(archive):
+def stage(archive, require_driver=True):
     with tarfile.open(archive) as files:
         names = files.getnames()
-        if not any(name.endswith('/virtio_gpu_dri.so') for name in names):
+        if require_driver and not any(name.endswith('/virtio_gpu_dri.so') for name in names):
             raise SystemExit('Mesa build did not produce virtio_gpu_dri.so')
         if any(name.startswith('/') or '..' in Path(name).parts for name in names):
             raise SystemExit('Unsafe guest graphics archive path')
@@ -25,13 +26,29 @@ def stage(archive):
     if archive.resolve() != OUTPUT.resolve():
         shutil.copyfile(archive, OUTPUT)
     OUTPUT.with_name('guest-virgl.sha256').write_text(hashlib.sha256(OUTPUT.read_bytes()).hexdigest() + '\n')
-    print('Staged ARM64 Mesa VirGL guest driver')
+    if require_driver:
+        print('Staged ARM64 Mesa VirGL guest driver')
+    else:
+        print('Skipped ARM64 Mesa VirGL guest driver build (ALPINE_SKIP_GUEST_GRAPHICS=1)')
 
 def main():
+    skip = os.environ.get('ALPINE_SKIP_GUEST_GRAPHICS') == '1'
     if len(sys.argv) == 3 and sys.argv[1] == '--stage':
         stage(Path(sys.argv[2])); return
     if OUTPUT.is_file():
-        stage(OUTPUT); return
+        try:
+            stage(OUTPUT)
+            return
+        except SystemExit:
+            if not skip:
+                raise
+    if skip:
+        OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+        if not OUTPUT.is_file():
+            with tarfile.open(OUTPUT, 'w:gz'):
+                pass
+        stage(OUTPUT, require_driver=False)
+        return
     WORK.mkdir(parents=True, exist_ok=True)
     archive = WORK / 'mesa-virgl.tar.gz'
     class Upload(BaseHTTPRequestHandler):
