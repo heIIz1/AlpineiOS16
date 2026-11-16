@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Dual-mapped RX/RW JIT allocator for iOS 17..27 (including iOS 26/27 TXM).
+ * Dual-mapped RX/RW JIT allocator for iOS 16.1+ (including iOS 26/27 TXM).
  * Adapted from Henge (Leviidev/Henge, GPL-2.0-or-later).
  */
 #include "winios_jit.h"
@@ -69,12 +69,13 @@ extern uint64_t winios_brk_probe(void);
     } while (0)
 
 /* Executable JIT pages above 0x7000000000 hang on iOS 26/27 TXM devices.
- * Reserve a 128 MiB zero-fill block in __DATA at launch so it sits inside the
- * low < 0x180000000 window, then deallocate it immediately before debugserver's
- * `_M<size>,rx` allocation takes the first-fit hole. */
+ * Reserve a 128 MiB block at runtime so it can sit inside the low < 0x180000000
+ * window, then deallocate it immediately before debugserver's `_M<size>,rx`
+ * allocation takes the first-fit hole. Avoid a large static reserve in __DATA,
+ * which is problematic on iOS 16 and increases launch/memory pressure. */
 #define WINIOS_JIT_LOW_LIMIT 0x7000000000ull
-__attribute__((used, aligned(16384)))
-static uint8_t g_jit_reserve[WINIOS_JIT_DEFAULT_BYTES + (16u << 10)];
+static uint8_t *g_jit_reserve;
+static size_t g_jit_reserve_bytes;
 static bool g_jit_reserve_released;
 
 static _Thread_local bool g_expecting_jit_trap;
@@ -142,6 +143,18 @@ static void winios_trap_handler(int sig, siginfo_t *info, void *ctx) {
 }
 
 void winios_jit_install_trap_handler(void) {
+    if (!g_jit_reserve && !g_jit_reserve_released) {
+        g_jit_reserve_bytes = WINIOS_JIT_DEFAULT_BYTES;
+        void *p = mmap(NULL, g_jit_reserve_bytes, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (p != MAP_FAILED) {
+            g_jit_reserve = (uint8_t *)p;
+            WINIOS_LOG("reserved low JIT hold at %p (%zu MiB)", p, g_jit_reserve_bytes >> 20);
+        } else {
+            WINIOS_LOG("could not reserve low JIT hold: %s", strerror(errno));
+            g_jit_reserve_bytes = 0;
+        }
+    }
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
@@ -171,11 +184,17 @@ size_t winios_available_memory_bytes(void) {
 }
 
 static void release_low_hold(size_t bytes) {
-    if (g_jit_reserve_released || bytes > WINIOS_JIT_DEFAULT_BYTES) return;
-    vm_address_t start = ((vm_address_t)g_jit_reserve + 16383) & ~(vm_address_t)16383;
-    kern_return_t kr = vm_deallocate(mach_task_self(), start, WINIOS_JIT_DEFAULT_BYTES);
-    WINIOS_LOG("released low __DATA hold at %#lx (%zu MiB): %s",
-               (unsigned long)start, WINIOS_JIT_DEFAULT_BYTES >> 20, mach_error_string(kr));
+    if (g_jit_reserve_released) return;
+    if (!g_jit_reserve || g_jit_reserve_bytes == 0) {
+        g_jit_reserve_released = true;
+        return;
+    }
+    if (bytes > g_jit_reserve_bytes) bytes = g_jit_reserve_bytes;
+    kern_return_t kr = vm_deallocate(mach_task_self(), (vm_address_t)g_jit_reserve, g_jit_reserve_bytes);
+    WINIOS_LOG("released low JIT hold at %p (%zu MiB): %s",
+               (void *)g_jit_reserve, g_jit_reserve_bytes >> 20, mach_error_string(kr));
+    g_jit_reserve = NULL;
+    g_jit_reserve_bytes = 0;
     g_jit_reserve_released = true;
 }
 
