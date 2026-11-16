@@ -16,6 +16,7 @@
 #include <mach/vm_map.h>
 #include <os/log.h>
 #include <os/proc.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -25,6 +26,10 @@
 #include <sys/sysctl.h>
 #include <sys/ucontext.h>
 #include <unistd.h>
+
+#ifndef MAP_JIT
+#define MAP_JIT 0x0800
+#endif
 
 /* Provide pipe2 if referenced by static glib/slirp on older iOS runtimes. */
 __attribute__((weak, visibility("default")))
@@ -246,24 +251,39 @@ bool winios_jit_acquire(size_t bytes, bool detach_after) {
         /* Pre-iOS 26 fallback where CS_DEBUGGED permits plain vm_remap RX/RW without trap servicing */
         if (!__builtin_available(iOS 26.0, *)) {
             release_low_hold(bytes);
-            uint8_t *rx = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+            int mmap_flags = MAP_PRIVATE | MAP_ANON | MAP_JIT;
+            uint8_t *rx = mmap(NULL, bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
+            if (rx == MAP_FAILED) {
+                mmap_flags = MAP_PRIVATE | MAP_ANON;
+                rx = mmap(NULL, bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
+            }
             if (rx != MAP_FAILED) {
+#if TARGET_OS_OSX
+                pthread_jit_write_protect_np(0);
+#endif
                 vm_address_t rw = 0;
                 vm_prot_t cur, max;
-                if (vm_remap(mach_task_self(), &rw, bytes, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
-                             (vm_address_t)rx, FALSE, &cur, &max, VM_INHERIT_NONE) == KERN_SUCCESS &&
-                    vm_protect(mach_task_self(), (vm_address_t)rx, bytes, FALSE,
-                               VM_PROT_READ | VM_PROT_EXECUTE) == KERN_SUCCESS &&
-                    vm_protect(mach_task_self(), rw, bytes, FALSE,
-                               VM_PROT_READ | VM_PROT_WRITE) == KERN_SUCCESS) {
+                kern_return_t remap_kr = vm_remap(mach_task_self(), &rw, bytes, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
+                             (vm_address_t)rx, FALSE, &cur, &max, VM_INHERIT_NONE);
+                kern_return_t rxprot_kr = (remap_kr == KERN_SUCCESS) ?
+                    vm_protect(mach_task_self(), (vm_address_t)rx, bytes, FALSE, VM_PROT_READ | VM_PROT_EXECUTE) : remap_kr;
+                kern_return_t rwprot_kr = (rxprot_kr == KERN_SUCCESS) ?
+                    vm_protect(mach_task_self(), rw, bytes, FALSE, VM_PROT_READ | VM_PROT_WRITE) : rxprot_kr;
+                if (remap_kr == KERN_SUCCESS && rxprot_kr == KERN_SUCCESS && rwprot_kr == KERN_SUCCESS) {
                     WinIosDualMapping m = {(uint8_t *)rw, rx, bytes};
                     if (jit_selftest(&m)) {
                         g_mapping = m;
                         atomic_store(&g_jit_live, true);
+#if TARGET_OS_OSX
+                        pthread_jit_write_protect_np(1);
+#endif
                         set_status("Live (%zu MiB plain RX/RW)", bytes >> 20);
                         return true;
                     }
                 }
+#if TARGET_OS_OSX
+                pthread_jit_write_protect_np(1);
+#endif
                 munmap(rx, bytes);
             }
         }
